@@ -3,10 +3,15 @@
 System architecture for **fleet-ai-anomaly-detection-system**: a Python backend for multinational
 EV fleet telemetry ingestion and ML-based anomaly detection.
 
-**Status of this document:** phase-1 design. No application code exists yet. Statements written in
-the present tense ("the normalizer converts…") describe the *specified* MVP behavior that later
-phases implement. Anything beyond the MVP is explicitly marked *architecture-supported* or
-*future*.
+**Status of this document:** the approved MVP design. Statements written in the present tense
+("the normalizer converts…") describe *specified* MVP behavior; where a capability is not built
+yet, this document says so at that point. Anything beyond the MVP is explicitly marked
+*architecture-supported* or *future*.
+
+Implemented so far: both FastAPI services, the API contracts and schemas, contract validation, the
+source telemetry domain model, and the `IngestTelemetry` boundary. Endpoints whose behavior depends
+on normalization, inference or persistence answer `501 Not Implemented` rather than fabricating a
+result.
 
 ## Contents
 
@@ -14,7 +19,7 @@ phases implement. Anything beyond the MVP is explicitly marked *architecture-sup
 2. [Context and container view](#2-context-and-container-view)
 3. [Telemetry Service internals](#3-telemetry-service-internals)
 4. [Ports and adapters](#4-ports-and-adapters)
-5. [Planned code layout](#5-planned-code-layout)
+5. [Code layout](#5-code-layout)
 6. [API contracts](#6-api-contracts)
 7. [Telemetry contract and unit normalization](#7-telemetry-contract-and-unit-normalization)
 8. [Time handling](#8-time-handling)
@@ -119,9 +124,9 @@ sequenceDiagram
 
     C->>A: POST /api/v1/telemetry
     A->>A: schema validation, tz-aware check
-    A->>U: CanonicalIngestCommand
+    A->>U: SourceTelemetryEvent
     U->>N: normalize units + event_time to UTC
-    N-->>U: canonical metrics, event_time UTC
+    N-->>U: CanonicalTelemetryEvent
     U->>U: stamp received_at, validate clock skew
     U->>R: find_by_event_id, short-circuit lookup
     alt already stored
@@ -130,7 +135,7 @@ sequenceDiagram
     else not seen yet
         U->>I: predict(canonical features), bounded timeout
         alt inference succeeds
-            I-->>U: is_anomaly, score, model name + version
+            I-->>U: is_anomaly, anomaly_score, model name + version
             U->>R: save with inference.status = COMPLETED
         else inference fails or times out
             I--xU: timeout / 5xx / connection error
@@ -148,6 +153,13 @@ sequenceDiagram
     end
     A-->>C: response
 ```
+
+**Naming.** Telemetry is *source* telemetry until `TelemetryNormalizer` has run, and *canonical*
+only after. So the adapter hands `IngestTelemetry` a **`SourceTelemetryEvent`** — values still in
+their source units, `event_time` still carrying the offset the device sent — and the normalizer
+returns a **`CanonicalTelemetryEvent`**. Nothing upstream of the normalizer is called canonical.
+`SourceTelemetryEvent` exists in code today; `CanonicalTelemetryEvent` and the normalizer that
+produces it arrive in a later phase.
 
 **Duplicate branches.** The authoritative duplicate check is the **unique `event_id` constraint**
 enforced by the store on `save`; the lookup before inference is only a short-circuit that avoids a
@@ -202,27 +214,35 @@ independent failure modes.* Anything else stays concrete.
 
 ---
 
-## 5. Planned code layout
+## 5. Code layout
 
-Created in later phases. Listed here so the boundaries above map to directories.
+Two independently runnable services, each with its own requirements and test suite.
 
 ```text
-services/
-  telemetry_service/
-    api/                  # FastAPI routers, request/response schemas, error mapping
-    application/          # IngestTelemetry, InferencePort, TelemetryRepository, DTOs
-    domain/               # telemetry model, units, TelemetryNormalizer, validation rules
-    infrastructure/       # MongoTelemetryRepository, HttpInferenceClient, settings
-  inference_service/
-    api/                  # /health, /model/info, /predict
-    model/                # artifact loading, metadata, feature ordering
-ml/                       # training script -> joblib artifact
-simulator/                # telemetry simulator client
+telemetry-service/
+  app/
+    api/routes/           # FastAPI routers, request/response schemas, error mapping
+    application/          # IngestTelemetry
+    domain/               # source telemetry model, metric and unit vocabulary
+    core/                 # settings
+  tests/
+inference-service/
+  app/
+    api/routes/           # /health, /model/info, /predict, canonical feature schemas
+    domain/               # canonical feature vocabulary
+    core/                 # settings
+  tests/
 docs/
 ```
 
 Dependency direction: `api → application → domain`, with `infrastructure` implementing
 `application` ports. `domain` imports nothing from the other layers.
+
+Directories that arrive with the code that fills them, rather than as empty packages:
+`telemetry-service/app/application/ports` and `telemetry-service/app/infrastructure` (with the
+first `TelemetryRepository` and `InferencePort` implementations — see
+[ADR-0008](DECISIONS.md#adr-0008-deliberately-limited-ports)), `inference-service/app/model`
+(artifact loading and metadata), and top-level `ml/` and `simulator/`.
 
 ---
 
@@ -289,7 +309,7 @@ contract](#7-telemetry-contract-and-unit-normalization).
   "inference": {
     "status": "COMPLETED",
     "is_anomaly": false,
-    "score": 0.0412,
+    "anomaly_score": 0.0412,
     "model_name": "isolation-forest-telemetry",
     "model_version": "0.1.0",
     "error_code": null
@@ -401,13 +421,13 @@ caller verify it is speaking the same dialect as the loaded artifact.
 ```json
 {
   "is_anomaly": false,
-  "score": 0.0412,
+  "anomaly_score": 0.0412,
   "model_name": "isolation-forest-telemetry",
   "model_version": "0.1.0"
 }
 ```
 
-`score` is the IsolationForest decision function: negative values are more anomalous,
+`anomaly_score` is the IsolationForest decision function: negative values are more anomalous,
 `is_anomaly` is `true` when the model's prediction is `-1`. The threshold lives in the model
 artifact, not in the Telemetry Service.
 
@@ -645,7 +665,7 @@ cannot overwrite an event that is already stored.
   "inference": {
     "status": "COMPLETED",
     "is_anomaly": false,
-    "score": 0.0412,
+    "anomaly_score": 0.0412,
     "model_name": "isolation-forest-telemetry",
     "model_version": "0.1.0",
     "error_code": null
@@ -788,7 +808,7 @@ When inference times out, returns an error, or is unreachable:
 
 1. **Preserve the telemetry** — the event is stored with its canonical metrics.
 2. **Record `inference.status = FAILED`** with an `error_code` describing the failure class.
-3. **Invent nothing** — `is_anomaly` and `score` stay `null`. Defaulting to "not an anomaly" would
+3. **Invent nothing** — `is_anomaly` and `anomaly_score` stay `null`. Defaulting to "not an anomaly" would
    record a false negative as if the model had spoken.
 4. **Expose the incompleteness** — the ingest response and telemetry queries show `FAILED`, and the
    anomalies endpoint excludes such events entirely.
@@ -796,7 +816,7 @@ When inference times out, returns an error, or is unreachable:
 ```mermaid
 flowchart TD
     A["Normalized telemetry"] --> B{"Call inference<br/>bounded timeout"}
-    B -->|"200 OK"| C["status = COMPLETED<br/>is_anomaly, score, model_version"]
+    B -->|"200 OK"| C["status = COMPLETED<br/>is_anomaly, anomaly_score, model_version"]
     B -->|"timeout"| D["status = FAILED<br/>error_code = INFERENCE_TIMEOUT"]
     B -->|"5xx / 503"| E["status = FAILED<br/>error_code = INFERENCE_UNAVAILABLE"]
     B -->|"connection error"| F["status = FAILED<br/>error_code = INFERENCE_UNREACHABLE"]

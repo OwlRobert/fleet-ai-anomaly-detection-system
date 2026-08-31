@@ -1,0 +1,12 @@
+# Test dependencies for both services.
+#
+# Install the service requirements alongside these to run the suites:
+#   pip install -r telemetry-service/requirements.txt \
+#               -r inference-service/requirements.txt \
+#               -r requirements-dev.txt
+#
+# httpx is required by starlette.testclient. It is a test-only dependency: no
+# application module imports it, and the Telemetry Service does not call the
+# Inference Service over HTTP in this phase.
+pytest==9.1.1
+httpx==0.28.1

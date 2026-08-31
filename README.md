@@ -8,9 +8,11 @@ The system normalizes that telemetry into a single canonical representation, sco
 scikit-learn model, and stores it as an append-only event history that can be queried per vehicle
 by time range.
 
-> **Phase status:** this phase defines requirements and architecture only.
-> There is no application code in the repository yet. Everything described below is either
-> *specified for the MVP implementation* or explicitly marked as a *future* concern.
+> **Status:** the architecture is defined, and both services are bootstrapped with their API
+> contracts, schemas and validation. Normalization, inference, persistence, the model and the
+> simulator are not implemented yet: endpoints that depend on them answer `501 Not Implemented`
+> rather than returning fabricated data. Everything else described below is either *specified for
+> the MVP implementation* or explicitly marked as a *future* concern.
 
 ---
 
@@ -173,24 +175,31 @@ The two that most shape day-to-day behavior:
 
 ---
 
-## 6. Planned repository layout
-
-Created in later phases — **not** in this one.
+## 6. Repository layout
 
 ```text
-services/
-  telemetry_service/
-    api/              # FastAPI routers + request/response schemas  (transport adapter)
-    application/      # IngestTelemetry use case, InferencePort, TelemetryRepository
-    domain/           # telemetry model, unit conversion, TelemetryNormalizer
-    infrastructure/   # MongoTelemetryRepository, HttpInferenceClient
-  inference_service/
-    api/              # FastAPI routers
-    model/            # artifact loading + metadata
-ml/                   # training script -> joblib artifact
-simulator/            # telemetry simulator client
+telemetry-service/
+  app/
+    api/routes/     # FastAPI routers, request/response schemas, error mapping
+    application/    # IngestTelemetry use case
+    domain/         # source telemetry model, metric and unit vocabulary
+    core/           # settings
+  tests/
+inference-service/
+  app/
+    api/routes/     # FastAPI routers, canonical feature schemas, error mapping
+    domain/         # canonical feature vocabulary
+    core/           # settings
+  tests/
 docs/
 ```
+
+Each service is independently runnable and has its own `requirements.txt`.
+
+Arriving with the phases that need them: `infrastructure/` and `application/ports` in the
+Telemetry Service (with the first repository and inference-client implementations), `model/` in
+the Inference Service, and top-level `ml/` and `simulator/`. Empty packages are not created ahead
+of the code that fills them.
 
 ---
 
@@ -198,10 +207,11 @@ docs/
 
 | Phase | Content |
 | --- | --- |
-| 1 | **Requirements and architecture (this phase)** — README, ARCHITECTURE, DECISIONS, config surface |
-| 2+ | Domain model, normalization, use case, services, persistence, model training, simulator |
+| 0 | Requirements and architecture — README, ARCHITECTURE, DECISIONS, config surface |
+| 1 | **Service foundations and contracts (current)** — both FastAPI services, API contracts, schemas, domain model, `IngestTelemetry` boundary, validation, tests |
+| 2+ | Normalization, inference, persistence, model training, simulator |
 
-Sequencing beyond phase 1 is decided per phase, not fixed here.
+Sequencing beyond the current phase is decided per phase, not fixed here.
 
 ---
 

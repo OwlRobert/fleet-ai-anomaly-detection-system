@@ -327,7 +327,7 @@ Service:
 
 1. **preserves the telemetry** — the event is stored with its canonical metrics;
 2. **records `inference.status = FAILED`** with an `error_code` naming the failure class;
-3. **invents nothing** — `is_anomaly` and `score` remain `null`;
+3. **invents nothing** — `is_anomaly` and `anomaly_score` remain `null`;
 4. **exposes the incompleteness** — the ingest response and telemetry queries show `FAILED`, and
    the anomalies endpoint excludes such events entirely.
 
