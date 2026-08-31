@@ -4,8 +4,8 @@ This module is the single source of truth for *which* metrics exist and *which*
 source units are accepted for each of them. The API schemas are validated
 against these tables (see ``tests/test_contract_consistency.py``).
 
-Phase 1 knows the canonical unit of every metric but deliberately does not
-convert to it: normalization is Phase 2 work performed by ``TelemetryNormalizer``.
+This module states *which* unit is canonical for each metric; the arithmetic
+that converts into it lives in ``app.domain.conversions``.
 """
 
 from enum import StrEnum
@@ -37,7 +37,7 @@ CANONICAL_UNITS: Mapping[MetricName, str] = MappingProxyType(
         MetricName.MOTOR_RPM: "rpm",
     }
 )
-"""Internal canonical unit per metric. Conversion into these units is Phase 2."""
+"""Internal canonical unit per metric, produced by ``TelemetryNormalizer``."""
 
 
 SUPPORTED_SOURCE_UNITS: Mapping[MetricName, tuple[str, ...]] = MappingProxyType(

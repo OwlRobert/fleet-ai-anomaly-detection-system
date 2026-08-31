@@ -3,8 +3,8 @@
 Concise ADRs for **fleet-ai-anomaly-detection-system**. Each record states the decision, why it was
 taken, what it costs, what was rejected, and the signal that should trigger revisiting it.
 
-All records below are **Accepted** as of 2026-08-31 and describe the phase-1 design. No application
-code implements them yet.
+All records below are **Accepted** as of 2026-08-31. Where a decision is already implemented, the
+record says so; the rest describe behavior later phases build.
 
 | ADR | Title |
 | --- | --- |

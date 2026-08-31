@@ -8,11 +8,13 @@ The system normalizes that telemetry into a single canonical representation, sco
 scikit-learn model, and stores it as an append-only event history that can be queried per vehicle
 by time range.
 
-> **Status:** the architecture is defined, and both services are bootstrapped with their API
-> contracts, schemas and validation. Normalization, inference, persistence, the model and the
-> simulator are not implemented yet: endpoints that depend on them answer `501 Not Implemented`
-> rather than returning fabricated data. Everything else described below is either *specified for
-> the MVP implementation* or explicitly marked as a *future* concern.
+> **Status:** the architecture is defined, both services are bootstrapped with their API contracts
+> and validation, and telemetry normalization is implemented — units to canonical units,
+> `event_time` to UTC, server-stamped `received_at`, and the clock-skew bounds. Inference,
+> persistence, the model and the simulator are not implemented yet: endpoints that depend on them
+> answer `501 Not Implemented` rather than returning fabricated data. Everything else described
+> below is either *specified for the MVP implementation* or explicitly marked as a *future*
+> concern.
 
 ---
 
@@ -208,8 +210,9 @@ of the code that fills them.
 | Phase | Content |
 | --- | --- |
 | 0 | Requirements and architecture — README, ARCHITECTURE, DECISIONS, config surface |
-| 1 | **Service foundations and contracts (current)** — both FastAPI services, API contracts, schemas, domain model, `IngestTelemetry` boundary, validation, tests |
-| 2+ | Normalization, inference, persistence, model training, simulator |
+| 1 | Service foundations and contracts — both FastAPI services, API contracts, schemas, domain model, `IngestTelemetry` boundary, validation, tests |
+| 2 | **Telemetry normalization (current)** — `CanonicalTelemetryEvent`, `TelemetryNormalizer`, unit conversion, UTC + `received_at`, clock-skew bounds |
+| 3+ | Inference, persistence, model training, simulator |
 
 Sequencing beyond the current phase is decided per phase, not fixed here.
 

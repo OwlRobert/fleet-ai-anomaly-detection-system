@@ -1,19 +1,44 @@
 """Shared fixtures for the Telemetry Service suite."""
 
 import copy
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_telemetry_normalizer
+from app.core.config import get_settings
+from app.domain.normalizer import TelemetryNormalizer
 from app.main import create_app
 
 TELEMETRY_URL = "/api/v1/telemetry"
 
+FIXED_NOW = datetime(2026, 9, 1, 16, 0, 0, tzinfo=timezone.utc)
+"""The server clock every API test runs against.
+
+Normalization stamps ``received_at`` and bounds clock skew against it, so the
+endpoint's behaviour would otherwise drift with the wall clock. Pinning it keeps
+every assertion exact and keeps the suite passing a year from now.
+"""
+
 
 @pytest.fixture
 def client() -> TestClient:
-    """A test client over a freshly built application."""
+    """A test client whose normalizer runs on the fixed clock."""
+    app = create_app()
+    settings = get_settings()
+    app.dependency_overrides[get_telemetry_normalizer] = lambda: TelemetryNormalizer(
+        clock=lambda: FIXED_NOW,
+        max_future_skew=timedelta(seconds=settings.max_clock_skew_future_seconds),
+        max_event_age=timedelta(days=settings.max_event_age_days),
+    )
+    return TestClient(app)
+
+
+@pytest.fixture
+def live_client() -> TestClient:
+    """A test client with no overrides, to prove the real wiring works."""
     return TestClient(create_app())
 
 

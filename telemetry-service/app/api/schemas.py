@@ -3,10 +3,10 @@
 Two things this module deliberately does *not* do:
 
 * **No unit conversion.** A measurement is accepted in its source unit and kept
-  in it. Converting mph to km/h is `TelemetryNormalizer`'s job in Phase 2.
+  in it. Converting mph to km/h is `TelemetryNormalizer`'s job, downstream.
 * **No time normalization.** ``event_time`` must be timezone-aware, and the
   offset the client sent is preserved. Conversion to UTC and the stamping of
-  ``received_at`` are Phase 2.
+  ``received_at`` happen in the normalizer, not here.
 
 Response models describe the contract these endpoints will fulfil once
 persistence and inference exist. They are published in OpenAPI so the contract
@@ -196,7 +196,8 @@ class TelemetryIngestRequest(BaseModel):
         """Translate the transport payload into the domain event.
 
         A straight mapping: values and units are carried across untouched, and
-        the offset on ``event_time`` is preserved. Normalization is Phase 2.
+        the offset on ``event_time`` is preserved. Normalization happens after
+        this point, inside the domain.
         """
         return SourceTelemetryEvent(
             schema_version=self.schema_version,

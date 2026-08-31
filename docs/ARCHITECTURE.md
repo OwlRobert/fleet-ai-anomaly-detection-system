@@ -9,9 +9,9 @@ yet, this document says so at that point. Anything beyond the MVP is explicitly 
 *architecture-supported* or *future*.
 
 Implemented so far: both FastAPI services, the API contracts and schemas, contract validation, the
-source telemetry domain model, and the `IngestTelemetry` boundary. Endpoints whose behavior depends
-on normalization, inference or persistence answer `501 Not Implemented` rather than fabricating a
-result.
+source and canonical telemetry domain models, `TelemetryNormalizer` (units, UTC, `received_at`,
+clock-skew bounds), and the `IngestTelemetry` boundary. Endpoints whose behavior depends on
+inference or persistence answer `501 Not Implemented` rather than fabricating a result.
 
 ## Contents
 
@@ -125,9 +125,10 @@ sequenceDiagram
     C->>A: POST /api/v1/telemetry
     A->>A: schema validation, tz-aware check
     A->>U: SourceTelemetryEvent
-    U->>N: normalize units + event_time to UTC
+    U->>N: normalize
+    N->>N: stamp received_at, validate clock skew
+    N->>N: units to canonical, event_time to UTC
     N-->>U: CanonicalTelemetryEvent
-    U->>U: stamp received_at, validate clock skew
     U->>R: find_by_event_id, short-circuit lookup
     alt already stored
         R-->>U: existing record
@@ -158,8 +159,9 @@ sequenceDiagram
 only after. So the adapter hands `IngestTelemetry` a **`SourceTelemetryEvent`** — values still in
 their source units, `event_time` still carrying the offset the device sent — and the normalizer
 returns a **`CanonicalTelemetryEvent`**. Nothing upstream of the normalizer is called canonical.
-`SourceTelemetryEvent` exists in code today; `CanonicalTelemetryEvent` and the normalizer that
-produces it arrive in a later phase.
+Both models and the normalizer exist in code. The normalizer also stamps `received_at` and applies
+the clock-skew bounds, because those belong to the same single pass that produces the canonical
+event.
 
 **Duplicate branches.** The authoritative duplicate check is the **unique `event_id` constraint**
 enforced by the store on `save`; the lookup before inference is only a short-circuit that avoids a
@@ -223,7 +225,7 @@ telemetry-service/
   app/
     api/routes/           # FastAPI routers, request/response schemas, error mapping
     application/          # IngestTelemetry
-    domain/               # source telemetry model, metric and unit vocabulary
+    domain/               # source + canonical models, units, conversions, TelemetryNormalizer
     core/                 # settings
   tests/
 inference-service/
@@ -571,7 +573,9 @@ rolling aggregates, sequence-based alerting — which the MVP does not do.
 
 ### 8.4 Clock-skew validation
 
-Two bounds, both configurable, both applied against `received_at`:
+Two bounds, both applied against `received_at` by `TelemetryNormalizer`, and both configurable
+through `MAX_CLOCK_SKEW_FUTURE_SECONDS` and `MAX_EVENT_AGE_DAYS`. Both are inclusive: an event
+exactly at a limit is accepted.
 
 | Rule | Default | Rejection code | Rationale |
 | --- | --- | --- | --- |

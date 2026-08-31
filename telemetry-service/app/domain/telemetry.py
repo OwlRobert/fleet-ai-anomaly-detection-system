@@ -2,9 +2,9 @@
 
 ``SourceTelemetryEvent`` is the *validated but not yet normalized* event: values
 are still expressed in their source units and ``event_time`` still carries the
-offset the device sent. Converting to canonical units and UTC produces a
-separate canonical representation, which is Phase 2 work and is deliberately
-absent here.
+offset the device sent. Converting it to canonical units and UTC produces a
+separate ``CanonicalTelemetryEvent``; this model is never mutated in the
+process.
 
 The domain depends on nothing outside the standard library: no FastAPI, no
 Pydantic, no database driver, no ML library.

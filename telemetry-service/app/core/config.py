@@ -1,12 +1,17 @@
 """Telemetry Service configuration.
 
-Only what Phase 1 actually uses. The unused settings documented in
-`.env.example` for later phases (MongoDB, inference client, clock skew, query
-limits) are deliberately not wired in here.
+Only what is actually used. The settings documented in `.env.example` for later
+phases (MongoDB, inference client, query limits) are deliberately not wired in
+here.
+
+The two clock-skew bounds are read under the exact names `.env.example`
+documents, which carry no service prefix; `validation_alias` bypasses
+``env_prefix`` so a documented variable is never silently renamed.
 """
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVICE_NAME = "telemetry-service"
@@ -23,6 +28,19 @@ class Settings(BaseSettings):
     )
 
     version: str = "0.1.0"
+
+    max_clock_skew_future_seconds: int = Field(
+        default=300,
+        ge=0,
+        validation_alias="MAX_CLOCK_SKEW_FUTURE_SECONDS",
+        description="How far ahead of received_at an event_time may sit before CLOCK_SKEW_FUTURE.",
+    )
+    max_event_age_days: int = Field(
+        default=30,
+        ge=0,
+        validation_alias="MAX_EVENT_AGE_DAYS",
+        description="How far behind received_at an event_time may sit before EVENT_TOO_OLD.",
+    )
 
 
 @lru_cache
