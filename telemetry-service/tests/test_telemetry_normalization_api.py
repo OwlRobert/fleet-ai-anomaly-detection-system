@@ -25,24 +25,26 @@ def at(offset: timedelta) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def test_normalized_event_still_reports_the_pipeline_as_incomplete(
+def test_normalized_event_is_stored_and_returned_in_canonical_units(
     client: TestClient, valid_payload: dict[str, Any]
 ) -> None:
-    response = client.post(TELEMETRY_URL, json=valid_payload)
-
-    assert response.status_code == 501
-    assert error_code(response) == "NOT_IMPLEMENTED"
-
-
-def test_normalization_success_leaks_no_canonical_internals_to_the_client(
-    client: TestClient, valid_payload: dict[str, Any]
-) -> None:
-    """The canonical event is internal until persistence returns it."""
+    """The response carries the normalized event: 32.3 mph came back as km/h."""
     body = client.post(TELEMETRY_URL, json=valid_payload).json()
 
-    assert set(body) == {"error"}
-    for internal in ("metrics", "source_units", "received_at", "canonical", "51.98"):
-        assert internal not in str(body)
+    assert body["metrics"]["speed"] == pytest.approx(51.9818112)
+    assert body["metrics"]["battery_temperature"] == pytest.approx(35.7777777777)
+    assert body["event_time"].endswith("Z") or "+00:00" in body["event_time"]
+
+
+def test_response_carries_no_storage_identity(
+    client: TestClient, valid_payload: dict[str, Any]
+) -> None:
+    """MongoDB's _id stops at the repository; source units are not echoed."""
+    body = client.post(TELEMETRY_URL, json=valid_payload).json()
+
+    assert "_id" not in body
+    assert "id" not in body
+    assert "source_units" not in body
 
 
 # --------------------------------------------------------------------------- #
@@ -66,7 +68,7 @@ def test_event_exactly_at_the_future_skew_limit_is_accepted(
 ) -> None:
     payload = payload_with(valid_payload, lambda p: p.__setitem__("event_time", at(timedelta(seconds=300))))
 
-    assert client.post(TELEMETRY_URL, json=payload).status_code == 501
+    assert client.post(TELEMETRY_URL, json=payload).status_code == 201
 
 
 def test_event_older_than_the_ingestion_window_is_rejected(
@@ -85,7 +87,7 @@ def test_event_exactly_at_the_max_age_is_accepted(
 ) -> None:
     payload = payload_with(valid_payload, lambda p: p.__setitem__("event_time", at(timedelta(days=-30))))
 
-    assert client.post(TELEMETRY_URL, json=payload).status_code == 501
+    assert client.post(TELEMETRY_URL, json=payload).status_code == 201
 
 
 def test_a_delayed_event_is_accepted(
@@ -93,7 +95,7 @@ def test_a_delayed_event_is_accepted(
 ) -> None:
     payload = payload_with(valid_payload, lambda p: p.__setitem__("event_time", at(timedelta(hours=-9))))
 
-    assert client.post(TELEMETRY_URL, json=payload).status_code == 501
+    assert client.post(TELEMETRY_URL, json=payload).status_code == 201
 
 
 def test_skew_rejection_reports_both_timestamps_without_correcting_them(
@@ -128,12 +130,12 @@ def test_skew_rejection_never_leaks_a_stack_trace(
 def test_an_older_event_after_a_newer_one_is_still_accepted(
     client: TestClient, valid_payload: dict[str, Any], payload_with: Mutate
 ) -> None:
-    """Processing order is not event-time order; both must normalize."""
-    newer = payload_with(valid_payload, lambda p: p.__setitem__("event_time", at(timedelta(minutes=-1))))
-    older = payload_with(valid_payload, lambda p: p.__setitem__("event_time", at(timedelta(hours=-5))))
+    """Processing order is not event-time order; both must be stored."""
+    newer = payload_with(valid_payload, lambda p: p.update(event_id="newer", event_time=at(timedelta(minutes=-1))))
+    older = payload_with(valid_payload, lambda p: p.update(event_id="older", event_time=at(timedelta(hours=-5))))
 
-    assert client.post(TELEMETRY_URL, json=newer).status_code == 501
-    assert client.post(TELEMETRY_URL, json=older).status_code == 501
+    assert client.post(TELEMETRY_URL, json=newer).status_code == 201
+    assert client.post(TELEMETRY_URL, json=older).status_code == 201
 
 
 # --------------------------------------------------------------------------- #

@@ -1,16 +1,19 @@
 """Wiring for the API layer.
 
 FastAPI's own ``Depends`` is the only injection mechanism; no container and no
-DI framework. This is where configuration becomes constructor arguments, so the
-domain keeps taking plain values and the routes keep taking a finished use case.
+DI framework. This is where configuration and the process-wide MongoDB client
+become constructor arguments, so the domain keeps taking plain values and the
+routes keep taking finished collaborators.
 """
 
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
+from app.application.errors import PersistenceUnavailableError
 from app.application.ingest_telemetry import IngestTelemetry
+from app.application.ports import TelemetryRepository
 from app.core.config import Settings, get_settings
 from app.domain.normalizer import TelemetryNormalizer
 
@@ -25,8 +28,20 @@ def get_telemetry_normalizer(
     )
 
 
+def get_telemetry_repository(request: Request) -> TelemetryRepository:
+    """Provide the repository built once at application startup.
+
+    One client and one repository per process, not per request.
+    """
+    repository = getattr(request.app.state, "telemetry_repository", None)
+    if repository is None:
+        raise PersistenceUnavailableError("telemetry store is not configured")
+    return repository
+
+
 def get_ingest_telemetry(
     normalizer: Annotated[TelemetryNormalizer, Depends(get_telemetry_normalizer)],
+    repository: Annotated[TelemetryRepository, Depends(get_telemetry_repository)],
 ) -> IngestTelemetry:
     """Provide the telemetry ingestion use case."""
-    return IngestTelemetry(normalizer=normalizer)
+    return IngestTelemetry(normalizer=normalizer, repository=repository)

@@ -8,13 +8,12 @@ The system normalizes that telemetry into a single canonical representation, sco
 scikit-learn model, and stores it as an append-only event history that can be queried per vehicle
 by time range.
 
-> **Status:** the architecture is defined, both services are bootstrapped with their API contracts
-> and validation, and telemetry normalization is implemented — units to canonical units,
-> `event_time` to UTC, server-stamped `received_at`, and the clock-skew bounds. Inference,
-> persistence, the model and the simulator are not implemented yet: endpoints that depend on them
-> answer `501 Not Implemented` rather than returning fabricated data. Everything else described
-> below is either *specified for the MVP implementation* or explicitly marked as a *future*
-> concern.
+> **Status:** telemetry ingestion works end to end — validated, normalized to canonical units and
+> UTC, and stored in MongoDB with idempotent, first-write-wins semantics on `event_id`. Both
+> history endpoints read from the store. Inference, the model and the simulator are not implemented
+> yet, so a stored event carries `inference.status: "PENDING"` — stored but never scored — and the
+> anomalies endpoint correctly returns nothing for it. Everything else described below is either
+> *specified for the MVP implementation* or explicitly marked as a *future* concern.
 
 ---
 
@@ -157,6 +156,7 @@ Recorded as concise ADRs in [`docs/DECISIONS.md`](docs/DECISIONS.md):
 | 0006 | Fail-open persistence when inference fails; fail-closed ingestion when persistence fails |
 | 0007 | Transport-independent ingestion use case |
 | 0008 | Deliberately limited ports: only `InferencePort` and `TelemetryRepository` |
+| 0009 | `PENDING` as the unscored inference state |
 
 The two that most shape day-to-day behavior:
 
@@ -183,8 +183,9 @@ The two that most shape day-to-day behavior:
 telemetry-service/
   app/
     api/routes/     # FastAPI routers, request/response schemas, error mapping
-    application/    # IngestTelemetry use case
-    domain/         # source telemetry model, metric and unit vocabulary
+    application/    # IngestTelemetry use case, TelemetryRepository port
+    domain/         # source + canonical models, units, conversions, normalizer
+    infrastructure/ # MongoDB client, indexes, repository, document mapping
     core/           # settings
   tests/
 inference-service/
@@ -211,8 +212,9 @@ of the code that fills them.
 | --- | --- |
 | 0 | Requirements and architecture — README, ARCHITECTURE, DECISIONS, config surface |
 | 1 | Service foundations and contracts — both FastAPI services, API contracts, schemas, domain model, `IngestTelemetry` boundary, validation, tests |
-| 2 | **Telemetry normalization (current)** — `CanonicalTelemetryEvent`, `TelemetryNormalizer`, unit conversion, UTC + `received_at`, clock-skew bounds |
-| 3+ | Inference, persistence, model training, simulator |
+| 2 | Telemetry normalization — `CanonicalTelemetryEvent`, `TelemetryNormalizer`, unit conversion, UTC + `received_at`, clock-skew bounds |
+| 3 | **MongoDB persistence and idempotency (current)** — `TelemetryRepository`, unique `event_id`, duplicate/conflict handling, indexes, history and anomaly queries |
+| 4+ | Inference integration, model training, simulator |
 
 Sequencing beyond the current phase is decided per phase, not fixed here.
 

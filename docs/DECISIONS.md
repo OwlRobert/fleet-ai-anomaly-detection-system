@@ -16,6 +16,7 @@ record says so; the rest describe behavior later phases build.
 | [0006](#adr-0006-fail-open-persistence-when-inference-fails) | Fail-open persistence when inference fails; fail-closed ingestion when persistence fails |
 | [0007](#adr-0007-transport-independent-ingestion-use-case) | Transport-independent ingestion use case |
 | [0008](#adr-0008-deliberately-limited-ports) | Deliberately limited ports |
+| [0009](#adr-0009-pending-as-the-unscored-inference-state) | `PENDING` as the unscored inference state |
 
 ---
 
@@ -451,3 +452,51 @@ indirection now and rarely fit the requirement that eventually arrives.
 
 A second real implementation appears for a currently-concrete component, or a component grows an
 independent external failure mode.
+
+---
+
+## ADR-0009: `PENDING` as the unscored inference state
+
+**Status:** Accepted · 2026-08-31
+
+### Context
+
+Persistence was implemented before inference. That produces a state the original
+design never modelled: an event that is stored but has never been scored. The
+`inference.status` vocabulary held only `COMPLETED` and `FAILED`, because the approved write path
+calls the model *before* the single persistence write, so every stored event already had a verdict.
+
+Neither existing value is true of an unscored event. `COMPLETED` would fabricate a verdict.
+`FAILED` would claim the model was called and did not answer, when it was never called at all —
+and that distinction matters operationally, because a genuine `FAILED` is a signal to investigate
+the inference service.
+
+### Decision
+
+Add a third state, **`PENDING`**: the event is persisted and has not been scored.
+
+* `PENDING` sets `is_anomaly`, `anomaly_score`, `model_name`, `model_version` and `error_code` to
+  null. Only `COMPLETED` carries a verdict.
+* A `PENDING` event is **never** returned by the anomalies endpoint, and is excluded from the
+  partial anomaly index. An unscored event is not a non-anomalous event.
+* `PENDING` describes a state, not an activity. It does **not** mean background scoring is running
+  or scheduled; there is no queue, worker or background task, and none is introduced by this
+  decision.
+* Once synchronous inference is integrated, a newly ingested event is written with `COMPLETED` or
+  `FAILED` directly, and `PENDING` is what a record keeps only until something scores it.
+
+### Consequences
+
+* Ingestion is a complete, honest operation before inference exists: `201 Created` with a truthful
+  state rather than a fabricated verdict or a misleading `501`.
+* Every consumer must handle three states, and must not read "not `COMPLETED`" as "normal".
+* The vocabulary already matches the asynchronous shape described in
+  [ADR-0002](#adr-0002-synchronous-http-inference-for-the-mvp), so adopting a queue later needs no
+  further status change.
+
+### Alternatives considered
+
+* **Reuse `FAILED`** — untrue, and it would hide real inference failures among events that were
+  never scored.
+* **Keep returning `501` until inference exists** — the event *was* stored, so the response would
+  misreport what happened, and a client would retry indefinitely against a successful write.

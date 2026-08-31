@@ -1,16 +1,19 @@
 """Shared fixtures for the Telemetry Service suite."""
 
 import copy
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_telemetry_normalizer
+from app.api.dependencies import get_telemetry_normalizer, get_telemetry_repository
 from app.core.config import get_settings
 from app.domain.normalizer import TelemetryNormalizer
 from app.main import create_app
+from tests.fakes import InMemoryTelemetryRepository
 
 TELEMETRY_URL = "/api/v1/telemetry"
 
@@ -24,22 +27,51 @@ every assertion exact and keeps the suite passing a year from now.
 
 
 @pytest.fixture
-def client() -> TestClient:
-    """A test client whose normalizer runs on the fixed clock."""
-    app = create_app()
+def anyio_backend() -> str:
+    """Run `@pytest.mark.anyio` tests on asyncio. No extra plugin needed."""
+    return "asyncio"
+
+
+@asynccontextmanager
+async def _no_database(app) -> AsyncIterator[None]:
+    """Replace the real lifespan so tests never open a MongoDB connection."""
+    app.state.mongo_client = None
+    app.state.telemetry_repository = None
+    yield
+
+
+@pytest.fixture
+def repository() -> InMemoryTelemetryRepository:
+    """The store the API tests run against."""
+    return InMemoryTelemetryRepository()
+
+
+@pytest.fixture
+def app(repository: InMemoryTelemetryRepository) -> FastAPI:
+    """An application on the fixed clock and the in-memory store."""
+    application = create_app(lifespan_handler=_no_database)
     settings = get_settings()
-    app.dependency_overrides[get_telemetry_normalizer] = lambda: TelemetryNormalizer(
+    application.dependency_overrides[get_telemetry_normalizer] = lambda: TelemetryNormalizer(
         clock=lambda: FIXED_NOW,
         max_future_skew=timedelta(seconds=settings.max_clock_skew_future_seconds),
         max_event_age=timedelta(days=settings.max_event_age_days),
     )
+    application.dependency_overrides[get_telemetry_repository] = lambda: repository
+    return application
+
+
+@pytest.fixture
+def client(app: FastAPI) -> TestClient:
+    """A test client whose normalizer runs on the fixed clock."""
     return TestClient(app)
 
 
 @pytest.fixture
-def live_client() -> TestClient:
-    """A test client with no overrides, to prove the real wiring works."""
-    return TestClient(create_app())
+def live_client(repository: InMemoryTelemetryRepository) -> TestClient:
+    """Real clock and real settings, but still no database connection."""
+    application = create_app(lifespan_handler=_no_database)
+    application.dependency_overrides[get_telemetry_repository] = lambda: repository
+    return TestClient(application)
 
 
 @pytest.fixture

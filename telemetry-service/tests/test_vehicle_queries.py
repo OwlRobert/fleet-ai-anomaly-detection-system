@@ -10,21 +10,20 @@ PATHS = ["/api/v1/vehicles/veh-tw-0142/telemetry", "/api/v1/vehicles/veh-tw-0142
 
 
 @pytest.mark.parametrize("path", PATHS)
-def test_history_is_refused_rather_than_faked(client: TestClient, path: str) -> None:
+def test_history_is_served_from_the_store(client: TestClient, path: str) -> None:
     response = client.get(path, params=RANGE)
 
-    assert response.status_code == 501
-    assert error_code(response) == "NOT_IMPLEMENTED"
+    assert response.status_code == 200
+    assert response.json()["vehicle_id"] == "veh-tw-0142"
 
 
 @pytest.mark.parametrize("path", PATHS)
-def test_history_never_fabricates_database_records(client: TestClient, path: str) -> None:
-    """Not an empty page either: an empty page would claim the store was consulted."""
+def test_empty_store_returns_an_empty_page_not_an_error(client: TestClient, path: str) -> None:
+    """An unknown vehicle is indistinguishable from one with no events."""
     body = client.get(path, params=RANGE).json()
 
-    assert set(body) == {"error"}
-    assert "items" not in str(body)
-    assert "count" not in str(body)
+    assert body["count"] == 0
+    assert body["items"] == []
 
 
 @pytest.mark.parametrize("path", PATHS)

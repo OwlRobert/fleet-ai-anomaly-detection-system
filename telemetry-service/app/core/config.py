@@ -1,8 +1,7 @@
 """Telemetry Service configuration.
 
 Only what is actually used. The settings documented in `.env.example` for later
-phases (MongoDB, inference client, query limits) are deliberately not wired in
-here.
+phases (the inference client) are deliberately not wired in here.
 
 The two clock-skew bounds are read under the exact names `.env.example`
 documents, which carry no service prefix; `validation_alias` bypasses
@@ -41,6 +40,46 @@ class Settings(BaseSettings):
         validation_alias="MAX_EVENT_AGE_DAYS",
         description="How far behind received_at an event_time may sit before EVENT_TOO_OLD.",
     )
+
+    mongodb_uri: str = Field(
+        default="mongodb://localhost:27017",
+        validation_alias="MONGODB_URI",
+        description="Connection string for the telemetry event store.",
+    )
+    mongodb_database: str = Field(
+        default="fleet_telemetry",
+        validation_alias="MONGODB_DATABASE",
+        description="Database holding the telemetry collection.",
+    )
+    mongodb_telemetry_collection: str = Field(
+        default="telemetry_events",
+        validation_alias="MONGODB_TELEMETRY_COLLECTION",
+        description="Collection of telemetry event documents.",
+    )
+    mongodb_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        validation_alias="MONGODB_TIMEOUT_SECONDS",
+        description="Server selection and socket timeout; ingestion fails closed when exceeded.",
+    )
+
+    query_default_limit: int = Field(
+        default=100,
+        ge=1,
+        validation_alias="TELEMETRY_QUERY_DEFAULT_LIMIT",
+        description="Default page size for the vehicle history endpoints.",
+    )
+    query_max_limit: int = Field(
+        default=1000,
+        ge=1,
+        validation_alias="TELEMETRY_QUERY_MAX_LIMIT",
+        description="Maximum page size for the vehicle history endpoints.",
+    )
+
+    @property
+    def mongodb_timeout_ms(self) -> int:
+        """The driver expects milliseconds."""
+        return int(self.mongodb_timeout_seconds * 1000)
 
 
 @lru_cache

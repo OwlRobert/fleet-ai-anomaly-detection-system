@@ -4,74 +4,66 @@ from datetime import timedelta
 
 import pytest
 
-from app.application.errors import CapabilityNotImplementedError
+from app.application.errors import PersistenceUnavailableError
 from app.application.ingest_telemetry import IngestTelemetry
-from app.domain.canonical import CanonicalTelemetryEvent
 from app.domain.errors import ClockSkewFutureError, EventTooOldError
+from app.domain.inference import InferenceStatus
 from app.domain.normalizer import TelemetryNormalizer
-from app.domain.telemetry import SourceTelemetryEvent
 from app.domain.units import MetricName
 from tests.factories import FIXED_NOW, one_metric, source_event
+from tests.fakes import InMemoryTelemetryRepository, UnavailableTelemetryRepository
+
+pytestmark = pytest.mark.anyio
 
 
-def use_case() -> IngestTelemetry:
-    return IngestTelemetry(normalizer=TelemetryNormalizer(clock=lambda: FIXED_NOW))
+def use_case(repository=None) -> IngestTelemetry:
+    return IngestTelemetry(
+        normalizer=TelemetryNormalizer(clock=lambda: FIXED_NOW),
+        repository=repository if repository is not None else InMemoryTelemetryRepository(),
+    )
 
 
-class RecordingNormalizer(TelemetryNormalizer):
-    """Records what it was handed, then normalizes for real."""
-
-    def __init__(self) -> None:
-        super().__init__(clock=lambda: FIXED_NOW)
-        self.seen: list[SourceTelemetryEvent] = []
-        self.produced: list[CanonicalTelemetryEvent] = []
-
-    def normalize(self, source_event: SourceTelemetryEvent) -> CanonicalTelemetryEvent:
-        self.seen.append(source_event)
-        canonical = super().normalize(source_event)
-        self.produced.append(canonical)
-        return canonical
-
-
-def test_use_case_is_callable_without_any_transport() -> None:
+async def test_use_case_is_callable_without_any_transport() -> None:
     """It takes a domain event, so MQTT could later call the same one."""
-    with pytest.raises(CapabilityNotImplementedError) as raised:
-        use_case().execute(source_event())
+    outcome = await use_case().execute(source_event())
 
-    assert raised.value.capability == "Telemetry ingestion"
-
-
-def test_the_source_event_reaches_the_normalizer_unchanged() -> None:
-    normalizer = RecordingNormalizer()
-    event = source_event(metrics=one_metric(MetricName.SPEED, 32.3, "mph"))
-
-    with pytest.raises(CapabilityNotImplementedError):
-        IngestTelemetry(normalizer=normalizer).execute(event)
-
-    assert normalizer.seen == [event]
+    assert outcome.duplicate is False
 
 
-def test_normalization_actually_runs_before_the_refusal() -> None:
-    """The refusal must come *after* real work, not instead of it."""
-    normalizer = RecordingNormalizer()
-    event = source_event(metrics=one_metric(MetricName.SPEED, 32.3, "mph"))
+async def test_normalization_runs_before_persistence() -> None:
+    repository = InMemoryTelemetryRepository()
 
-    with pytest.raises(CapabilityNotImplementedError):
-        IngestTelemetry(normalizer=normalizer).execute(event)
+    await use_case(repository).execute(source_event(metrics=one_metric(MetricName.SPEED, 32.3, "mph")))
 
-    canonical = normalizer.produced[0]
-    assert canonical.metrics[MetricName.SPEED] == pytest.approx(51.9818112)
-    assert canonical.source_units[MetricName.SPEED] == "mph"
-    assert canonical.received_at == FIXED_NOW
+    stored = repository.events[0]
+    assert stored.event.metrics[MetricName.SPEED] == pytest.approx(51.9818112)
+    assert stored.event.source_units[MetricName.SPEED] == "mph"
+    assert stored.event.received_at == FIXED_NOW
 
 
-def test_refusal_names_what_is_still_missing() -> None:
-    """Normalization is done; inference and persistence are not."""
-    with pytest.raises(CapabilityNotImplementedError) as raised:
-        use_case().execute(source_event())
+async def test_a_stored_event_is_unscored() -> None:
+    """No model ran, so no verdict is invented."""
+    repository = InMemoryTelemetryRepository()
 
-    assert "normalized" in raised.value.arrives_in
-    assert "inference and persistence" in raised.value.arrives_in
+    await use_case(repository).execute(source_event())
+
+    inference = repository.events[0].inference
+    assert inference.status is InferenceStatus.PENDING
+    assert inference.is_anomaly is None
+    assert inference.anomaly_score is None
+    assert inference.model_name is None
+    assert inference.model_version is None
+    assert inference.error_code is None
+    assert inference.is_confirmed_anomaly is False
+
+
+async def test_transport_provenance_is_recorded() -> None:
+    repository = InMemoryTelemetryRepository()
+
+    await use_case(repository).execute(source_event(), transport="rest", api_version="v1")
+
+    assert repository.events[0].transport == "rest"
+    assert repository.events[0].api_version == "v1"
 
 
 @pytest.mark.parametrize(
@@ -81,16 +73,21 @@ def test_refusal_names_what_is_still_missing() -> None:
         pytest.param(timedelta(days=-90), EventTooOldError, id="too-old"),
     ],
 )
-def test_normalization_errors_propagate_instead_of_the_not_implemented_refusal(
-    offset: timedelta, expected: type[Exception]
-) -> None:
-    """A rejected event never reaches the point where the pipeline stops."""
+async def test_a_rejected_event_is_never_stored(offset: timedelta, expected: type[Exception]) -> None:
+    repository = InMemoryTelemetryRepository()
+
     with pytest.raises(expected):
-        use_case().execute(source_event(event_time=FIXED_NOW + offset))
+        await use_case(repository).execute(source_event(event_time=FIXED_NOW + offset))
+
+    assert repository.events == []
 
 
-def test_use_case_holds_only_the_collaborators_that_exist() -> None:
-    """No repository and no inference port are faked to fill the pipeline."""
-    instance = use_case()
+async def test_persistence_failure_propagates_so_ingestion_fails_closed() -> None:
+    """The caller must never be told an unstored event was accepted."""
+    with pytest.raises(PersistenceUnavailableError):
+        await use_case(UnavailableTelemetryRepository()).execute(source_event())
 
-    assert list(vars(instance)) == ["_normalizer"]
+
+async def test_use_case_holds_only_the_collaborators_that_exist() -> None:
+    """No inference port is faked to fill the pipeline."""
+    assert sorted(vars(use_case())) == ["_normalizer", "_repository"]

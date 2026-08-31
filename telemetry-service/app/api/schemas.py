@@ -29,6 +29,7 @@ from pydantic_core import PydanticCustomError
 
 from app.domain.telemetry import Measurement as DomainMeasurement
 from app.domain.telemetry import SourceTelemetryEvent
+from app.domain.stored import StoredTelemetryEvent
 from app.domain.units import SCHEMA_VERSION, MetricName
 
 # --------------------------------------------------------------------------- #
@@ -255,14 +256,20 @@ class CanonicalMetrics(BaseModel):
 
 
 class InferenceOutcome(BaseModel):
-    """What the model said, and which model said it.
+    """What the model said about this event, and which model said it.
 
-    ``FAILED`` means inference did not complete. ``is_anomaly`` and
-    ``anomaly_score`` are then null: an unscored event is never reported as a
-    non-anomaly.
+    Three states:
+
+    * ``PENDING``   — the event is stored but has not been scored.
+    * ``COMPLETED`` — the model ran and returned a verdict.
+    * ``FAILED``    — the model was called and did not answer.
+
+    Only ``COMPLETED`` carries a verdict. Under ``PENDING`` and ``FAILED`` every
+    other field is null, because an unscored event is not a non-anomalous event
+    and is never reported as one.
     """
 
-    status: Literal["COMPLETED", "FAILED"]
+    status: Literal["PENDING", "COMPLETED", "FAILED"]
     is_anomaly: bool | None = None
     anomaly_score: float | None = None
     model_name: str | None = None
@@ -284,6 +291,34 @@ class TelemetryEventResponse(BaseModel):
     metrics: CanonicalMetrics
     inference: InferenceOutcome
 
+    @classmethod
+    def from_stored(cls, stored: StoredTelemetryEvent, *, duplicate: bool) -> "TelemetryEventResponse":
+        """Render a stored event for the wire.
+
+        Storage identity never appears here: the response carries ``event_id``
+        and nothing MongoDB assigned.
+        """
+        event = stored.event
+        return cls(
+            event_id=event.event_id,
+            vehicle_id=event.vehicle_id,
+            site_id=event.site_id,
+            event_time=event.event_time,
+            received_at=event.received_at,
+            duplicate=duplicate,
+            metrics=CanonicalMetrics(
+                **{metric.value: value for metric, value in event.metrics.items()}
+            ),
+            inference=InferenceOutcome(
+                status=stored.inference.status.value,
+                is_anomaly=stored.inference.is_anomaly,
+                anomaly_score=stored.inference.anomaly_score,
+                model_name=stored.inference.model_name,
+                model_version=stored.inference.model_version,
+                error_code=stored.inference.error_code,
+            ),
+        )
+
 
 class VehicleTelemetryPage(BaseModel):
     """A page of vehicle events, ordered by `event_time` descending."""
@@ -293,3 +328,18 @@ class VehicleTelemetryPage(BaseModel):
     end: datetime
     count: int
     items: list[TelemetryEventResponse]
+
+    @classmethod
+    def from_stored(
+        cls,
+        vehicle_id: str,
+        start: datetime,
+        end: datetime,
+        events: list[StoredTelemetryEvent],
+    ) -> "VehicleTelemetryPage":
+        """Render a repository result as a page.
+
+        ``duplicate`` is false throughout: these are reads, not ingestions.
+        """
+        items = [TelemetryEventResponse.from_stored(event, duplicate=False) for event in events]
+        return cls(vehicle_id=vehicle_id, start=start, end=end, count=len(items), items=items)

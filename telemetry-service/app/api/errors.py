@@ -15,7 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.application.errors import CapabilityNotImplementedError
+from app.application.errors import CapabilityNotImplementedError, PersistenceUnavailableError
 from app.domain.errors import (
     ClockSkewError,
     ClockSkewFutureError,
@@ -33,6 +33,7 @@ MISSING_METRIC: Final = "MISSING_METRIC"
 INVALID_TIME_RANGE: Final = "INVALID_TIME_RANGE"
 CLOCK_SKEW_FUTURE: Final = "CLOCK_SKEW_FUTURE"
 EVENT_TOO_OLD: Final = "EVENT_TOO_OLD"
+PERSISTENCE_UNAVAILABLE: Final = "PERSISTENCE_UNAVAILABLE"
 
 #: Which contract code each normalization rejection maps to. The domain raises
 #: a typed error and stays free of API vocabulary; the mapping lives here.
@@ -141,6 +142,25 @@ async def _handle_normalization_error(_: Request, exc: NormalizationError) -> JS
     )
 
 
+async def _handle_persistence_unavailable(
+    _: Request, exc: PersistenceUnavailableError
+) -> JSONResponse:
+    """Ingestion is fail-closed on persistence: say so, and say nothing more.
+
+    The client is told the event was **not** accepted, so its retry — safe by
+    ``event_id`` idempotency — is the recovery path. Driver exception names,
+    hostnames and connection strings never appear in the response.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=_envelope(
+            PERSISTENCE_UNAVAILABLE,
+            "The telemetry store is unavailable; the event was not accepted. Retry is safe.",
+            {"retryable": True},
+        ),
+    )
+
+
 async def _handle_not_implemented(_: Request, exc: CapabilityNotImplementedError) -> JSONResponse:
     """Render an unimplemented capability as 501 rather than a fabricated success."""
     return JSONResponse(
@@ -157,4 +177,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     """Attach the envelope handlers to the application."""
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(NormalizationError, _handle_normalization_error)
+    app.add_exception_handler(PersistenceUnavailableError, _handle_persistence_unavailable)
     app.add_exception_handler(CapabilityNotImplementedError, _handle_not_implemented)

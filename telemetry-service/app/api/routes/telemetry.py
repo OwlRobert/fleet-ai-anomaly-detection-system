@@ -8,7 +8,7 @@ invoke the same use case.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 
 from app.api.dependencies import get_ingest_telemetry
 from app.api.errors import ErrorEnvelope
@@ -17,35 +17,46 @@ from app.application.ingest_telemetry import IngestTelemetry
 
 router = APIRouter(prefix="/api/v1", tags=["telemetry"])
 
+API_VERSION = "v1"
+TRANSPORT = "rest"
+
 
 @router.post(
     "/telemetry",
     status_code=status.HTTP_201_CREATED,
+    response_model=TelemetryEventResponse,
     summary="Ingest one telemetry event",
     description=(
         "Accepts a single telemetry event in its **source units** — every metric "
         "carries its own explicit unit, and there is no request-level unit "
         "system. `event_time` must be timezone-aware.\n\n"
-        "The payload is validated against the telemetry contract and then "
-        "normalized: units are converted to canonical units, `event_time` is "
-        "converted to UTC, and `received_at` is stamped from the server clock. "
-        "An `event_time` outside the accepted window around `received_at` is "
-        "rejected with `CLOCK_SKEW_FUTURE` or `EVENT_TOO_OLD`.\n\n"
-        "Inference and persistence are not implemented yet, so a successfully "
-        "normalized event is answered with **501 Not Implemented** rather than "
-        "a fabricated result. The 201 schema below is the contract this "
-        "endpoint will fulfil once those capabilities exist."
+        "The payload is validated, normalized to canonical units and UTC, "
+        "stamped with `received_at`, and stored exactly once.\n\n"
+        "Ingestion is idempotent on `event_id`: a first event answers **201 "
+        "Created** with `duplicate: false`, and any retry answers **200 OK** "
+        "with `duplicate: true` and the event that was stored first, unchanged. "
+        "Uniqueness is enforced by the store, so concurrent retries cannot both "
+        "create a record.\n\n"
+        "Inference is not implemented yet, so a newly stored event carries "
+        "`inference.status: \"PENDING\"` — stored but never scored. No anomaly "
+        "verdict is invented, and a pending event is never returned by the "
+        "anomalies endpoint."
     ),
     responses={
-        201: {"model": TelemetryEventResponse, "description": "Event stored and scored (not yet implemented)."},
+        200: {"model": TelemetryEventResponse, "description": "Duplicate event_id; the event stored first is returned unchanged."},
+        201: {"model": TelemetryEventResponse, "description": "Event stored. Not yet scored."},
         422: {"model": ErrorEnvelope, "description": "Payload failed contract validation or was rejected by clock-skew bounds."},
-        501: {"model": ErrorEnvelope, "description": "Event normalized, but inference and persistence are not implemented yet."},
+        503: {"model": ErrorEnvelope, "description": "Telemetry could not be stored; the event was not accepted. Retry is safe."},
     },
 )
-def ingest_telemetry(
+async def ingest_telemetry(
     request: TelemetryIngestRequest,
+    response: Response,
     use_case: Annotated[IngestTelemetry, Depends(get_ingest_telemetry)],
-) -> None:
-    # The use case owns the outcome: it normalizes, then refuses because there
-    # is nowhere to put the result yet. Persistence turns that into a 201 body.
-    use_case.execute(request.to_domain_event())
+) -> TelemetryEventResponse:
+    outcome = await use_case.execute(
+        request.to_domain_event(), transport=TRANSPORT, api_version=API_VERSION
+    )
+    if outcome.duplicate:
+        response.status_code = status.HTTP_200_OK
+    return TelemetryEventResponse.from_stored(outcome.stored, duplicate=outcome.duplicate)

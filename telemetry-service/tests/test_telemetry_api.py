@@ -4,26 +4,30 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from tests.conftest import TELEMETRY_URL, error_code
+from tests.conftest import TELEMETRY_URL
 
 
-def test_valid_ingest_is_refused_rather_than_faked(client: TestClient, valid_payload: dict[str, Any]) -> None:
+def test_valid_ingest_is_stored(client: TestClient, valid_payload: dict[str, Any]) -> None:
     response = client.post(TELEMETRY_URL, json=valid_payload)
 
-    assert response.status_code == 501
-    assert error_code(response) == "NOT_IMPLEMENTED"
+    assert response.status_code == 201
+    assert response.json()["duplicate"] is False
 
 
-def test_ingest_never_fabricates_persistence_or_inference(
+def test_ingest_never_fabricates_an_inference_verdict(
     client: TestClient, valid_payload: dict[str, Any]
 ) -> None:
-    """No stored record, no anomaly verdict, no received_at, no duplicate flag."""
-    body = client.post(TELEMETRY_URL, json=valid_payload).json()
+    """The event is stored and unscored. No model ran, so nothing is claimed."""
+    inference = client.post(TELEMETRY_URL, json=valid_payload).json()["inference"]
 
-    assert set(body) == {"error"}
-    serialized = str(body)
-    for fabricated in ("is_anomaly", "anomaly_score", "received_at", "duplicate", "COMPLETED"):
-        assert fabricated not in serialized
+    assert inference == {
+        "status": "PENDING",
+        "is_anomaly": None,
+        "anomaly_score": None,
+        "model_name": None,
+        "model_version": None,
+        "error_code": None,
+    }
 
 
 def test_error_responses_use_the_contract_envelope(client: TestClient) -> None:

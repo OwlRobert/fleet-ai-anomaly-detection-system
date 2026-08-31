@@ -10,8 +10,9 @@ yet, this document says so at that point. Anything beyond the MVP is explicitly 
 
 Implemented so far: both FastAPI services, the API contracts and schemas, contract validation, the
 source and canonical telemetry domain models, `TelemetryNormalizer` (units, UTC, `received_at`,
-clock-skew bounds), and the `IngestTelemetry` boundary. Endpoints whose behavior depends on
-inference or persistence answer `501 Not Implemented` rather than fabricating a result.
+clock-skew bounds), the `IngestTelemetry` use case, and MongoDB persistence with idempotent
+ingestion and both history queries. Inference is not implemented, so a stored event carries
+`inference.status: "PENDING"` — stored but never scored — and no anomaly verdict is fabricated.
 
 ## Contents
 
@@ -224,8 +225,9 @@ Two independently runnable services, each with its own requirements and test sui
 telemetry-service/
   app/
     api/routes/           # FastAPI routers, request/response schemas, error mapping
-    application/          # IngestTelemetry
+    application/          # IngestTelemetry, TelemetryRepository port
     domain/               # source + canonical models, units, conversions, TelemetryNormalizer
+    infrastructure/       # MongoDB client, indexes, repository, document mapping
     core/                 # settings
   tests/
 inference-service/
@@ -241,10 +243,9 @@ Dependency direction: `api → application → domain`, with `infrastructure` im
 `application` ports. `domain` imports nothing from the other layers.
 
 Directories that arrive with the code that fills them, rather than as empty packages:
-`telemetry-service/app/application/ports` and `telemetry-service/app/infrastructure` (with the
-first `TelemetryRepository` and `InferencePort` implementations — see
-[ADR-0008](DECISIONS.md#adr-0008-deliberately-limited-ports)), `inference-service/app/model`
-(artifact loading and metadata), and top-level `ml/` and `simulator/`.
+`inference-service/app/model` (artifact loading and metadata), and top-level `ml/` and
+`simulator/`. `InferencePort` and its adapter join `app/application` and `app/infrastructure` when
+inference is integrated — see [ADR-0008](DECISIONS.md#adr-0008-deliberately-limited-ports).
 
 ---
 
@@ -690,7 +691,10 @@ Notes:
   which is exactly what normalization exists to prevent.
 * `source_units` is provenance: it answers "what did the device actually send?" after the fact,
   which matters when a conversion bug is suspected. It is never used for querying or scoring.
-* `inference` records *what the model said and which model said it*. Version fields make a
+* `inference` records *what the model said and which model said it*, in one of three states.
+  `PENDING` means the event is stored but has not been scored; `COMPLETED` carries a verdict;
+  `FAILED` means the model was called and did not answer. Only `COMPLETED` populates the other
+  fields, because the absence of a verdict is not a negative verdict. Version fields make a
   historical result interpretable after the model changes.
 * `ingest.transport` distinguishes REST from a future MQTT path without changing the document
   shape.

@@ -20,6 +20,18 @@ from typing import Mapping
 from app.domain.units import MetricName
 
 
+STORAGE_RESOLUTION_MICROSECONDS = 1000
+"""The event store keeps timestamps to the millisecond."""
+
+
+def _to_storage_resolution(value: datetime) -> datetime:
+    """Truncate to the resolution the event store preserves."""
+    return value.replace(
+        microsecond=(value.microsecond // STORAGE_RESOLUTION_MICROSECONDS)
+        * STORAGE_RESOLUTION_MICROSECONDS
+    )
+
+
 def _require_utc(name: str, value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
@@ -66,6 +78,39 @@ class CanonicalTelemetryEvent:
         _require_utc("received_at", self.received_at)
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
         object.__setattr__(self, "source_units", MappingProxyType(dict(self.source_units)))
+
+    @property
+    def logical_identity(self) -> tuple:
+        """Everything that makes this the *same logical event*.
+
+        This is the single definition of logical equality, used to tell an
+        idempotent retry apart from a conflicting reuse of an ``event_id``.
+
+        ``received_at`` is deliberately excluded: it is stamped by the server
+        and therefore differs on every retry, so including it would make every
+        retry look like a conflict. Storage identity, inference results and
+        ingest metadata are excluded for the same reason — none of them is part
+        of what the device reported.
+
+        ``event_time`` is compared at **millisecond** resolution, because that
+        is the resolution the event store keeps. A first write of
+        ``…:22.481789Z`` comes back as ``…:22.481000Z``, so comparing at full
+        precision would judge every retry of a sub-millisecond timestamp to be
+        a conflict.
+        """
+        return (
+            self.schema_version,
+            self.event_id,
+            self.vehicle_id,
+            self.site_id,
+            _to_storage_resolution(self.event_time),
+            tuple(sorted((metric.value, value) for metric, value in self.metrics.items())),
+            tuple(sorted((metric.value, unit) for metric, unit in self.source_units.items())),
+        )
+
+    def is_same_logical_event(self, other: "CanonicalTelemetryEvent") -> bool:
+        """Whether ``other`` is a retry of this event rather than a different one."""
+        return self.logical_identity == other.logical_identity
 
     @property
     def ingest_delay(self) -> timedelta:

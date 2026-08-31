@@ -10,3 +10,8 @@
 # Inference Service over HTTP in this phase.
 pytest==9.1.1
 httpx==0.28.1
+
+# The MongoDB integration tests are skipped unless a test instance is pointed at:
+#   TEST_MONGODB_URI=mongodb://localhost:27017 python -m pytest
+# They use their own database and drop it afterwards. Async tests run on anyio's
+# pytest plugin, which arrives with FastAPI, so no extra async plugin is needed.
