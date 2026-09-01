@@ -2,3 +2,8 @@ fastapi==0.141.1
 pydantic==2.13.5
 pydantic-settings==2.15.0
 uvicorn==0.41.0
+
+# The model. numpy and scipy arrive as scikit-learn's dependencies; no module
+# here imports them directly, so they are not listed as direct requirements.
+scikit-learn==1.9.0
+joblib==1.6.0

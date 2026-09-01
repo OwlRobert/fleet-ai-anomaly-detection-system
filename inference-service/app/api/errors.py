@@ -15,12 +15,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.core.errors import CapabilityNotImplementedError
+from app.core.errors import ModelNotLoadedError
 
 SCHEMA_VALIDATION_FAILED: Final = "SCHEMA_VALIDATION_FAILED"
-
-#: Phase 1 only. Removed once a model artifact can actually be loaded and served.
-NOT_IMPLEMENTED: Final = "NOT_IMPLEMENTED"
+MODEL_NOT_LOADED: Final = "MODEL_NOT_LOADED"
 
 
 class Error(BaseModel):
@@ -87,14 +85,18 @@ async def _handle_validation_error(_: Request, exc: RequestValidationError) -> J
     )
 
 
-async def _handle_not_implemented(_: Request, exc: CapabilityNotImplementedError) -> JSONResponse:
-    """Render an unimplemented capability as 501 rather than a fabricated result."""
+async def _handle_model_not_loaded(_: Request, exc: ModelNotLoadedError) -> JSONResponse:
+    """Say the model is unavailable rather than inventing a verdict.
+
+    The message is fixed prose. The exception text and the artifact path stay in
+    the logs: a client has no business learning where the file lives.
+    """
     return JSONResponse(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content=_envelope(
-            NOT_IMPLEMENTED,
-            str(exc),
-            {"capability": exc.capability, "arrives_in": exc.arrives_in},
+            MODEL_NOT_LOADED,
+            "No model is loaded; this instance cannot serve predictions.",
+            {"retryable": True},
         ),
     )
 
@@ -102,4 +104,4 @@ async def _handle_not_implemented(_: Request, exc: CapabilityNotImplementedError
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach the envelope handlers to the application."""
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
-    app.add_exception_handler(CapabilityNotImplementedError, _handle_not_implemented)
+    app.add_exception_handler(ModelNotLoadedError, _handle_model_not_loaded)

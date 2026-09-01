@@ -9,11 +9,15 @@ scikit-learn model, and stores it as an append-only event history that can be qu
 by time range.
 
 > **Status:** telemetry ingestion works end to end — validated, normalized to canonical units and
-> UTC, and stored in MongoDB with idempotent, first-write-wins semantics on `event_id`. Both
-> history endpoints read from the store. Inference, the model and the simulator are not implemented
-> yet, so a stored event carries `inference.status: "PENDING"` — stored but never scored — and the
-> anomalies endpoint correctly returns nothing for it. Everything else described below is either
-> *specified for the MVP implementation* or explicitly marked as a *future* concern.
+> UTC, and stored in MongoDB with idempotent, first-write-wins semantics on `event_id`. The
+> Inference Service serves a real scikit-learn IsolationForest, trained offline and loaded from a
+> joblib artifact at startup.
+>
+> The two services are **not connected yet**: the Telemetry Service does not call the Inference
+> Service, so a stored event still carries `inference.status: "PENDING"` — stored but never scored
+> — and the anomalies endpoint correctly returns nothing for it. The simulator is not implemented.
+> Everything else below is either *specified for the MVP implementation* or marked as a *future*
+> concern.
 
 ---
 
@@ -191,8 +195,11 @@ telemetry-service/
 inference-service/
   app/
     api/routes/     # FastAPI routers, canonical feature schemas, error mapping
-    domain/         # canonical feature vocabulary
+    application/    # InferenceService
+    domain/         # feature vocabulary, prediction and model types
+    infrastructure/ # artifact read/write + validation, IsolationForest wrapper
     core/           # settings
+  ml/               # synthetic data generator + training script
   tests/
 docs/
 ```
@@ -213,8 +220,9 @@ of the code that fills them.
 | 0 | Requirements and architecture — README, ARCHITECTURE, DECISIONS, config surface |
 | 1 | Service foundations and contracts — both FastAPI services, API contracts, schemas, domain model, `IngestTelemetry` boundary, validation, tests |
 | 2 | Telemetry normalization — `CanonicalTelemetryEvent`, `TelemetryNormalizer`, unit conversion, UTC + `received_at`, clock-skew bounds |
-| 3 | **MongoDB persistence and idempotency (current)** — `TelemetryRepository`, unique `event_id`, duplicate/conflict handling, indexes, history and anomaly queries |
-| 4+ | Inference integration, model training, simulator |
+| 3 | MongoDB persistence and idempotency — `TelemetryRepository`, unique `event_id`, duplicate/conflict handling, indexes, history and anomaly queries |
+| 4 | **Anomaly model and Inference Service (current)** — synthetic training data, IsolationForest training, joblib artifact, load-time validation, real `/predict` and `/model/info` |
+| 5+ | Telemetry → inference integration, simulator |
 
 Sequencing beyond the current phase is decided per phase, not fixed here.
 
@@ -232,12 +240,76 @@ nowhere.
 
 ---
 
-## 9. Configuration
+## 9. The anomaly model
+
+**IsolationForest**, trained offline on synthetic data, served by the Inference Service.
+
+*Why IsolationForest.* Anomaly labels for fleet telemetry are scarce, and this project
+demonstrates an end-to-end model deployment lifecycle rather than maximizing predictive accuracy.
+IsolationForest needs no labels, trains in under a second here, and has an interpretable decision
+boundary.
+
+*What it is trained on.* `inference-service/ml/generate_training_data.py` produces deterministic
+synthetic samples of normal operation. Voltage tracks state of charge, motor speed tracks road
+speed, and current tracks load, so the model learns a joint structure rather than six independent
+ranges — which is what lets it flag `0 km/h at 9000 rpm`, a sample whose values are each
+individually ordinary.
+
+> **The synthetic dataset and thresholds are demonstration assumptions and are not validated
+> against a specific production EV platform.** IsolationForest also cannot extrapolate beyond its
+> training range, so a single wildly out-of-range feature is not guaranteed to be flagged.
+
+*Features*, in the one authoritative order used for training, inference and metadata alike:
+
+```text
+soc · battery_voltage · battery_current · battery_temperature · speed · motor_rpm
+```
+
+Reordering them is a model version change, not a refactor, and the loader refuses an artifact whose
+recorded order differs.
+
+*`anomaly_score`* is **anomaly-oriented: higher means more anomalous.** It is the negated
+IsolationForest decision function, `-decision_function(x)`, so the model's own decision boundary
+sits at zero — above `0` is an outlier, `0` or below an inlier. `is_anomaly` comes from the model's
+own prediction. The score is a **ranking score, not a probability**: it is unbounded and
+deliberately not squashed into `[0, 1]`.
+
+*Training and serving are separate.* The service never trains; it loads one artifact at startup and
+reuses it for every request. If the artifact is missing, corrupt, or records a different feature
+vocabulary, the process still starts, `/health` reports `model_loaded: false`, and `/predict` and
+`/model/info` answer `503 MODEL_NOT_LOADED` rather than inventing a verdict.
+
+### Retraining locally
+
+```bash
+cd inference-service
+PYTHONPATH=. python ml/train.py          # writes ml/artifacts/isolation_forest_v0_1_0.joblib
+```
+
+The artifact is git-ignored — it is a ~20 MB generated binary — and rebuilt from the script.
+`--samples`, `--seed`, `--model-version` and `--output` are available.
+
+### Running the Inference Service
+
+```bash
+cd inference-service
+PYTHONPATH=. uvicorn app.main:app --port 8001
+```
+
+| Endpoint | Behaviour |
+| --- | --- |
+| `GET /health` | Liveness, plus `model_loaded`. Always `200` while the process is alive |
+| `GET /model/info` | Name, version, algorithm, training time, feature order, canonical units, artifact digest and sklearn version — all read from the loaded artifact |
+| `POST /predict` | Scores one canonical feature vector; `422` on a contract violation, `503` with no model |
+
+---
+
+## 10. Configuration
 
 `.env.example` documents the full configuration surface of both services. It contains no secrets
 and is the only environment file committed to the repository.
 
-## 10. Documentation
+## 11. Documentation
 
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, contracts, data model, failure
   policy, multinational concerns, extension points.

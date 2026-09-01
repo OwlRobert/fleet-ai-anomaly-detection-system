@@ -17,6 +17,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.features import CANONICAL_UNITS
+from app.domain.prediction import ModelMetadata, Prediction
 
 CanonicalValue = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 """A finite JSON number. Strings, booleans, NaN and Infinity are rejected."""
@@ -70,9 +71,27 @@ class PredictionResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     is_anomaly: bool = Field(description="True when the model classifies this vector as anomalous.")
-    anomaly_score: float = Field(description="Anomaly score from the model. Lower values are more anomalous.")
+    anomaly_score: float = Field(
+        description=(
+            "Anomaly-oriented score: **higher means more anomalous**. It is the "
+            "negated IsolationForest decision function, so the model's decision "
+            "boundary sits at zero — above 0 is an outlier, 0 or below an "
+            "inlier. A ranking score, **not a probability**: it is unbounded and "
+            "deliberately not squashed into [0, 1]."
+        )
+    )
     model_name: str = Field(description="Name of the model that produced this result.")
     model_version: str = Field(description="Version of the model that produced this result.")
+
+    @classmethod
+    def from_prediction(cls, prediction: Prediction) -> "PredictionResponse":
+        """Render a domain prediction for the wire."""
+        return cls(
+            is_anomaly=prediction.is_anomaly,
+            anomaly_score=prediction.anomaly_score,
+            model_name=prediction.model_name,
+            model_version=prediction.model_version,
+        )
 
 
 class ModelInfoResponse(BaseModel):
@@ -92,3 +111,21 @@ class ModelInfoResponse(BaseModel):
     canonical_units: dict[str, str] = Field(description="Canonical unit per feature.")
     artifact_sha256: str = Field(description="Digest of the loaded artifact file.")
     sklearn_version: str = Field(description="scikit-learn version the artifact was trained with.")
+
+    @classmethod
+    def from_metadata(cls, metadata: ModelMetadata) -> "ModelInfoResponse":
+        """Render the loaded artifact's own metadata.
+
+        Every value comes from the artifact, so this cannot drift from the model
+        actually being served.
+        """
+        return cls(
+            model_name=metadata.model_name,
+            model_version=metadata.model_version,
+            algorithm=metadata.algorithm,
+            trained_at=metadata.trained_at,
+            feature_order=list(metadata.feature_order),
+            canonical_units=dict(metadata.canonical_units),
+            artifact_sha256=metadata.artifact_sha256,
+            sklearn_version=metadata.sklearn_version,
+        )

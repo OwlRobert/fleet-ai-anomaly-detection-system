@@ -1,14 +1,20 @@
 """Service-level errors, free of any web framework."""
 
 
-class CapabilityNotImplementedError(RuntimeError):
-    """A capability defined by the architecture is not implemented yet.
+class ArtifactLoadError(RuntimeError):
+    """The model artifact could not be loaded or is not usable.
 
-    Raised instead of returning a fabricated prediction or fabricated model
-    metadata. The API layer maps it to ``501 Not Implemented``.
+    Raised at startup only. The service stays alive without a model — it just
+    cannot serve predictions — so this never becomes a fabricated result.
+
+    The message is for the logs. It may name a file path, so it must not be
+    echoed to a client.
     """
 
-    def __init__(self, capability: str, arrives_in: str) -> None:
-        super().__init__(f"{capability} is not implemented yet ({arrives_in})")
-        self.capability = capability
-        self.arrives_in = arrives_in
+
+class ModelNotLoadedError(RuntimeError):
+    """A prediction or model description was requested with no model loaded.
+
+    Raised instead of inventing a verdict. The API layer maps it to
+    ``503 MODEL_NOT_LOADED``.
+    """
