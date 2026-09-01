@@ -8,15 +8,18 @@ EV fleet telemetry ingestion and ML-based anomaly detection.
 yet, this document says so at that point. Anything beyond the MVP is explicitly marked
 *architecture-supported* or *future*.
 
-Implemented so far: both FastAPI services, the API contracts and schemas, contract validation, the
-source and canonical telemetry domain models, `TelemetryNormalizer` (units, UTC, `received_at`,
-clock-skew bounds), the `IngestTelemetry` use case, MongoDB persistence with idempotent ingestion
-and both history queries, and the Inference Service's full model lifecycle — synthetic training
-data, training, joblib artifact, load-time validation, and real scoring on `/predict`.
+The MVP write path is complete: an event is validated, normalized, scored synchronously by the
+Inference Service over HTTP, and stored with the verdict, under idempotent `event_id` semantics.
+Both history queries and the full model lifecycle — synthetic training data, training, joblib
+artifact, load-time validation, `/predict` — are implemented.
 
-Not yet connected: the Telemetry Service does not call the Inference Service. A stored event still
-carries `inference.status: "PENDING"` — stored but never scored — and no anomaly verdict is
-fabricated.
+Every synchronously ingested event now finishes `COMPLETED` or `FAILED`. `PENDING` remains in the
+schema for records written before inference was integrated, and for the asynchronous write path
+[ADR-0002](DECISIONS.md#adr-0002-synchronous-http-inference-for-the-mvp) describes; the synchronous
+path no longer produces it.
+
+Not implemented: the telemetry simulator, and everything listed under
+[§16](#16-out-of-scope).
 
 ## Contents
 
@@ -883,11 +886,20 @@ the uniqueness constraint and returns `200 OK` with `duplicate: true`
 ([§9](#9-event-identity-and-idempotency)).
 
 **Timeout and retry policy.** One inference attempt per ingest, with a bounded timeout
-(`INFERENCE_TIMEOUT_SECONDS`, default 2 s). No in-request retries in the MVP: retrying inside a
-synchronous request multiplies tail latency while the client is blocked, and the client's own
-retry already covers the transient case. A circuit breaker and a backfill job that re-scores
-`FAILED` events are natural additions, both enabled by `inference.status` being recorded rather
-than inferred. See
+(`INFERENCE_TIMEOUT_SECONDS`, default 2 s, applied to connect and read alike). No in-request
+retries: retrying inside a synchronous request multiplies tail latency while the client is blocked,
+and the client's own retry already covers the transient case. A circuit breaker and a backfill job
+that re-scores `FAILED` events are natural additions, both enabled by `inference.status` being
+recorded rather than inferred.
+
+**A retry never re-scores.** The `find_by_event_id` lookup runs *before* the inference call, so a
+duplicate returns the stored verdict — `COMPLETED` or `FAILED` — exactly as first written. Re-running
+inference on a retry would make the same request produce different answers.
+
+**Concurrent duplicates may both score.** Two requests that both read "absent" will both call
+inference before the unique index resolves the race. The loser's verdict is discarded with its
+write; only the first stored event survives. The cost is one wasted inference call, which is
+cheaper than a distributed lock on every ingest. See
 [ADR-0006](DECISIONS.md#adr-0006-fail-open-persistence-when-inference-fails).
 
 ---

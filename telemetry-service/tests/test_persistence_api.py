@@ -30,7 +30,7 @@ def test_a_first_event_is_created(client: TestClient, valid_payload: dict[str, A
 
     assert response.status_code == 201
     assert response.json()["duplicate"] is False
-    assert response.json()["inference"]["status"] == "PENDING"
+    assert response.json()["inference"]["status"] == "COMPLETED"
 
 
 def test_an_exact_retry_returns_200_and_the_original(
@@ -125,10 +125,10 @@ def test_an_ingested_event_appears_in_the_history(
     assert page["items"][0]["metrics"]["speed"] == pytest.approx(51.9818112)
 
 
-def test_an_ingested_event_is_not_an_anomaly(
+def test_an_event_the_model_called_normal_is_not_an_anomaly(
     client: TestClient, valid_payload: dict[str, Any]
 ) -> None:
-    """It was never scored, and unscored is not non-anomalous either way."""
+    """The stub scores it normal, so it is stored COMPLETED and excluded here."""
     client.post(TELEMETRY_URL, json=valid_payload)
 
     assert client.get(ANOMALIES_URL, params=RANGE).json()["count"] == 0

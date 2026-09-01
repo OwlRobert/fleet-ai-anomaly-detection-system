@@ -8,6 +8,10 @@ from fastapi import FastAPI
 from app.api.errors import register_exception_handlers
 from app.api.routes import health, telemetry, vehicles
 from app.core.config import Settings, get_settings
+from app.infrastructure.http_inference_client import (
+    HttpInferenceClient,
+    create_inference_client,
+)
 from app.infrastructure.mongo import create_client, ensure_indexes, get_collection
 from app.infrastructure.telemetry_repository import MongoTelemetryRepository
 
@@ -20,10 +24,11 @@ temperature. `event_time` must be timezone-aware; naive timestamps are rejected
 rather than assumed. Everything is normalized to canonical units and UTC before
 storage, and ingestion is idempotent on `event_id`.
 
-**Implementation status.** Validation, normalization and persistence are
-implemented. Inference is not, so a stored event carries
-`inference.status: "PENDING"` — stored but never scored. No anomaly verdict is
-invented, and the anomalies endpoint correctly returns nothing for such events.
+Each event is scored synchronously by the Inference Service before it is
+stored. The two dependencies have opposite failure policies: if inference
+fails the telemetry is stored anyway with `inference.status: "FAILED"` and no
+invented verdict (**fail-open**); if persistence fails the request returns
+`503` and nothing is acknowledged (**fail-closed**).
 """
 
 
@@ -35,16 +40,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     here so a fresh database is usable immediately; ``create_index`` is
     idempotent, so this is safe on every boot.
 
-    Startup does not fail if MongoDB is unreachable: the process still serves
-    `/health` and reports itself unready on `/health/ready`, and ingestion fails
-    closed with `503` until the store comes back.
+    The HTTP client for the Inference Service is owned the same way: one
+    connection pool for the process, not one per request. Building it opens no
+    connection, so an Inference Service that is down does not affect startup —
+    that failure surfaces per request, fail-open.
+
+    Startup does not fail if MongoDB is unreachable either: the process still
+    serves `/health` and reports itself unready on `/health/ready`, and
+    ingestion fails closed with `503` until the store comes back.
     """
     settings: Settings = get_settings()
     client = create_client(settings.mongodb_uri, settings.mongodb_timeout_ms)
     collection = get_collection(client[settings.mongodb_database], settings.mongodb_telemetry_collection)
 
+    inference_client = create_inference_client(
+        settings.inference_service_url, settings.inference_timeout_seconds
+    )
+
     app.state.mongo_client = client
     app.state.telemetry_repository = MongoTelemetryRepository(collection)
+    app.state.inference_http_client = inference_client
+    app.state.inference_port = HttpInferenceClient(inference_client)
     try:
         await ensure_indexes(collection)
     except Exception:  # noqa: BLE001 - an unreachable store must not stop the process
@@ -55,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await inference_client.aclose()
         await client.close()
 
 

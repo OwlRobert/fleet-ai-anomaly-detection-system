@@ -71,8 +71,9 @@ async def _check_telemetry_store(request: Request) -> DependencyStatus:
         "required — ingestion is fail-closed on it — so an unreachable "
         "telemetry store makes this instance **not ready** and answers `503`.\n\n"
         "The Inference Service is deliberately absent from this check: inference "
-        "failure is fail-open for telemetry persistence, so it must never make "
-        "this instance look unready. It is also not implemented yet."
+        "failure is fail-open for telemetry persistence, so an inference outage "
+        "degrades the verdict but never stops ingestion, and must never make "
+        "this instance look unready."
     ),
     responses={
         200: {"model": ReadinessResponse, "description": "Every required dependency answered."},

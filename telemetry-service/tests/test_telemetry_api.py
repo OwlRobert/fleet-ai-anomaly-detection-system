@@ -5,6 +5,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from tests.conftest import TELEMETRY_URL
+from tests.fakes import StubInferencePort
 
 
 def test_valid_ingest_is_stored(client: TestClient, valid_payload: dict[str, Any]) -> None:
@@ -14,20 +15,21 @@ def test_valid_ingest_is_stored(client: TestClient, valid_payload: dict[str, Any
     assert response.json()["duplicate"] is False
 
 
-def test_ingest_never_fabricates_an_inference_verdict(
-    client: TestClient, valid_payload: dict[str, Any]
+def test_ingest_returns_the_models_actual_verdict(
+    client: TestClient, valid_payload: dict[str, Any], inference: StubInferencePort
 ) -> None:
-    """The event is stored and unscored. No model ran, so nothing is claimed."""
-    inference = client.post(TELEMETRY_URL, json=valid_payload).json()["inference"]
+    """Whatever the model said is what the client is told. Nothing invented."""
+    body = client.post(TELEMETRY_URL, json=valid_payload).json()["inference"]
 
-    assert inference == {
-        "status": "PENDING",
-        "is_anomaly": None,
-        "anomaly_score": None,
-        "model_name": None,
-        "model_version": None,
+    assert body == {
+        "status": "COMPLETED",
+        "is_anomaly": False,
+        "anomaly_score": -0.1034,
+        "model_name": "isolation-forest-telemetry",
+        "model_version": "0.1.0",
         "error_code": None,
     }
+    assert inference.call_count == 1
 
 
 def test_error_responses_use_the_contract_envelope(client: TestClient) -> None:

@@ -8,16 +8,16 @@ The system normalizes that telemetry into a single canonical representation, sco
 scikit-learn model, and stores it as an append-only event history that can be queried per vehicle
 by time range.
 
-> **Status:** telemetry ingestion works end to end — validated, normalized to canonical units and
-> UTC, and stored in MongoDB with idempotent, first-write-wins semantics on `event_id`. The
-> Inference Service serves a real scikit-learn IsolationForest, trained offline and loaded from a
-> joblib artifact at startup.
+> **Status:** the MVP write path is complete. Telemetry is validated, normalized to canonical
+> units and UTC, scored synchronously by the Inference Service over HTTP, and stored in MongoDB
+> with idempotent, first-write-wins semantics on `event_id`. The anomalies endpoint returns real
+> model verdicts.
 >
-> The two services are **not connected yet**: the Telemetry Service does not call the Inference
-> Service, so a stored event still carries `inference.status: "PENDING"` — stored but never scored
-> — and the anomalies endpoint correctly returns nothing for it. The simulator is not implemented.
-> Everything else below is either *specified for the MVP implementation* or marked as a *future*
-> concern.
+> The two failure policies are opposite by design: an inference outage still stores the telemetry
+> with `inference.status: "FAILED"` and no invented verdict (**fail-open**), while a persistence
+> outage returns `503` and acknowledges nothing (**fail-closed**). The simulator is not
+> implemented. Everything else below is either *specified for the MVP implementation* or marked as
+> a *future* concern.
 
 ---
 
@@ -221,8 +221,9 @@ of the code that fills them.
 | 1 | Service foundations and contracts — both FastAPI services, API contracts, schemas, domain model, `IngestTelemetry` boundary, validation, tests |
 | 2 | Telemetry normalization — `CanonicalTelemetryEvent`, `TelemetryNormalizer`, unit conversion, UTC + `received_at`, clock-skew bounds |
 | 3 | MongoDB persistence and idempotency — `TelemetryRepository`, unique `event_id`, duplicate/conflict handling, indexes, history and anomaly queries |
-| 4 | **Anomaly model and Inference Service (current)** — synthetic training data, IsolationForest training, joblib artifact, load-time validation, real `/predict` and `/model/info` |
-| 5+ | Telemetry → inference integration, simulator |
+| 4 | Anomaly model and Inference Service — synthetic training data, IsolationForest training, joblib artifact, load-time validation, real `/predict` and `/model/info` |
+| 5 | **Telemetry ↔ inference integration (current)** — `InferencePort`, HTTP client, synchronous scoring, fail-open inference, `COMPLETED`/`FAILED` persistence |
+| 6+ | Simulator, and the concerns listed as future below |
 
 Sequencing beyond the current phase is decided per phase, not fixed here.
 
@@ -278,6 +279,34 @@ deliberately not squashed into `[0, 1]`.
 reuses it for every request. If the artifact is missing, corrupt, or records a different feature
 vocabulary, the process still starts, `/health` reports `model_loaded: false`, and `/predict` and
 `/model/info` answer `503 MODEL_NOT_LOADED` rather than inventing a verdict.
+
+### How the Telemetry Service uses it
+
+Each ingested event is scored **synchronously** over HTTP — one attempt, a bounded
+`INFERENCE_TIMEOUT_SECONDS` (default 2 s), and **no retries**, because the fail-open policy already
+protects the measurement and a retry inside the request would only add tail latency.
+
+| Outcome | Stored `inference` | HTTP |
+| --- | --- | --- |
+| Model answered | `COMPLETED` with `is_anomaly`, `anomaly_score`, `model_name`, `model_version` | `201` |
+| Timeout / unreachable / upstream 5xx / unusable response | `FAILED` with `error_code`, every verdict field `null` | `201` — the telemetry is kept |
+| Store unavailable | nothing written | `503 PERSISTENCE_UNAVAILABLE` |
+| Retry of a stored `event_id` | unchanged; **inference is not called again** | `200`, `duplicate: true` |
+
+Failure codes are `INFERENCE_TIMEOUT`, `INFERENCE_UNAVAILABLE`, `INFERENCE_UNREACHABLE` and
+`INFERENCE_INVALID_RESPONSE`. A `200` is not trusted on its own: the response body is validated
+before it becomes a verdict, so a malformed one is recorded as `FAILED` rather than stored as
+`COMPLETED`.
+
+An inference outage never makes the Telemetry Service unready — `/health/ready` checks only the
+telemetry store, because ingestion is fail-closed on persistence and fail-open on inference.
+
+```bash
+# both services, pointed at each other
+cd inference-service && PYTHONPATH=. uvicorn app.main:app --port 8001
+cd telemetry-service && INFERENCE_SERVICE_URL=http://127.0.0.1:8001 \
+    PYTHONPATH=. uvicorn app.main:app --port 8000
+```
 
 ### Retraining locally
 

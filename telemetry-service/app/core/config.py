@@ -1,7 +1,6 @@
 """Telemetry Service configuration.
 
-Only what is actually used. The settings documented in `.env.example` for later
-phases (the inference client) are deliberately not wired in here.
+Only what is actually used.
 
 The two clock-skew bounds are read under the exact names `.env.example`
 documents, which carry no service prefix; `validation_alias` bypasses
@@ -61,6 +60,18 @@ class Settings(BaseSettings):
         gt=0,
         validation_alias="MONGODB_TIMEOUT_SECONDS",
         description="Server selection and socket timeout; ingestion fails closed when exceeded.",
+    )
+
+    inference_service_url: str = Field(
+        default="http://localhost:8001",
+        validation_alias="INFERENCE_SERVICE_URL",
+        description="Base URL of the Inference Service.",
+    )
+    inference_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        validation_alias="INFERENCE_TIMEOUT_SECONDS",
+        description="Bounded timeout for one inference attempt. No retries.",
     )
 
     query_default_limit: int = Field(

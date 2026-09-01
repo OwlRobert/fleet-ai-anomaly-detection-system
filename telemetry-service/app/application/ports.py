@@ -1,19 +1,46 @@
 """Application ports.
 
-One port, introduced now because Phase 3 finally has two things to put behind
-it: a MongoDB implementation and an in-memory fake for tests. It is a specific
-interface shaped by the four things the application actually does, not a
-generic repository.
+Two ports, each introduced only when a second implementation or an external
+system with its own failure modes actually arrived. Both are specific
+interfaces shaped by what the application does, not generic infrastructure.
 
-The port speaks **domain identity only**. ``event_id`` crosses it; MongoDB's
-``_id`` never does, which is what lets an alternate store reproduce the same
-idempotency semantics without leaking its own identity model upward.
+``TelemetryRepository`` speaks **domain identity only**. ``event_id`` crosses
+it; MongoDB's ``_id`` never does, which is what lets an alternate store
+reproduce the same idempotency semantics without leaking its own identity model
+upward.
+
+``InferencePort`` speaks **canonical features only**. No HTTP type, no URL and
+no client library reaches the application layer through it.
 """
 
 from datetime import datetime
-from typing import Protocol
+from typing import Mapping, Protocol
 
+from app.domain.inference import InferenceOutcome
 from app.domain.stored import StoredTelemetryEvent
+from app.domain.units import MetricName
+
+
+class InferencePort(Protocol):
+    """The anomaly model, as the application needs it."""
+
+    async def predict(self, features: Mapping[MetricName, float]) -> InferenceOutcome:
+        """Score one canonical feature vector.
+
+        Args:
+            features: Canonical values keyed by metric, already normalized.
+                Source units never reach this boundary.
+
+        Returns:
+            A ``COMPLETED`` outcome carrying the model's verdict and identity.
+
+        Raises:
+            InferenceFailedError: If no verdict could be obtained, carrying the
+                error code describing the failure class. Ingestion is fail-open
+                on this: the caller records the failure and stores the telemetry
+                anyway.
+        """
+        ...
 
 
 class TelemetryRepository(Protocol):

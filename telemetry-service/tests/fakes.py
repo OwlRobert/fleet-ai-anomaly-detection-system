@@ -8,10 +8,16 @@ itself; that is what the integration tests are for.
 """
 
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Mapping
 
-from app.application.errors import DuplicateEventIdError, PersistenceUnavailableError
+from app.application.errors import (
+    DuplicateEventIdError,
+    InferenceFailedError,
+    PersistenceUnavailableError,
+)
+from app.domain.inference import InferenceErrorCode, InferenceOutcome
 from app.domain.stored import StoredTelemetryEvent
+from app.domain.units import MetricName
 
 
 class InMemoryTelemetryRepository:
@@ -91,3 +97,40 @@ class UnavailableTelemetryRepository:
         self, vehicle_id: str, start: datetime, end: datetime, limit: int
     ) -> list[StoredTelemetryEvent]:
         raise PersistenceUnavailableError("telemetry store could not be queried")
+
+
+class StubInferencePort:
+    """A stand-in for the Inference Service at the port boundary.
+
+    It records what it was asked to score, so tests can prove the *canonical*
+    values crossed the boundary, and can be told to fail with any approved
+    error code.
+    """
+
+    def __init__(
+        self,
+        *,
+        is_anomaly: bool = False,
+        anomaly_score: float = -0.1034,
+        model_name: str = "isolation-forest-telemetry",
+        model_version: str = "0.1.0",
+        fail_with: InferenceErrorCode | None = None,
+    ) -> None:
+        self.calls: list[Mapping[MetricName, float]] = []
+        self.fail_with = fail_with
+        self._outcome = InferenceOutcome.completed(
+            is_anomaly=is_anomaly,
+            anomaly_score=anomaly_score,
+            model_name=model_name,
+            model_version=model_version,
+        )
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    async def predict(self, features: Mapping[MetricName, float]) -> InferenceOutcome:
+        self.calls.append(dict(features))
+        if self.fail_with is not None:
+            raise InferenceFailedError(self.fail_with, "stubbed failure")
+        return self._outcome

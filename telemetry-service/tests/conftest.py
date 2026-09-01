@@ -9,11 +9,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_telemetry_normalizer, get_telemetry_repository
+from app.api.dependencies import (
+    get_inference_port,
+    get_telemetry_normalizer,
+    get_telemetry_repository,
+)
 from app.core.config import get_settings
 from app.domain.normalizer import TelemetryNormalizer
 from app.main import create_app
-from tests.fakes import InMemoryTelemetryRepository
+from tests.fakes import InMemoryTelemetryRepository, StubInferencePort
 
 TELEMETRY_URL = "/api/v1/telemetry"
 
@@ -33,10 +37,11 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def _no_database(app) -> AsyncIterator[None]:
-    """Replace the real lifespan so tests never open a MongoDB connection."""
+async def _no_external_services(app) -> AsyncIterator[None]:
+    """Replace the real lifespan: no MongoDB connection, no HTTP client."""
     app.state.mongo_client = None
     app.state.telemetry_repository = None
+    app.state.inference_port = None
     yield
 
 
@@ -47,9 +52,15 @@ def repository() -> InMemoryTelemetryRepository:
 
 
 @pytest.fixture
-def app(repository: InMemoryTelemetryRepository) -> FastAPI:
-    """An application on the fixed clock and the in-memory store."""
-    application = create_app(lifespan_handler=_no_database)
+def inference() -> StubInferencePort:
+    """The inference boundary the API tests run against."""
+    return StubInferencePort()
+
+
+@pytest.fixture
+def app(repository: InMemoryTelemetryRepository, inference: StubInferencePort) -> FastAPI:
+    """An application on the fixed clock, the in-memory store and a stub model."""
+    application = create_app(lifespan_handler=_no_external_services)
     settings = get_settings()
     application.dependency_overrides[get_telemetry_normalizer] = lambda: TelemetryNormalizer(
         clock=lambda: FIXED_NOW,
@@ -57,6 +68,7 @@ def app(repository: InMemoryTelemetryRepository) -> FastAPI:
         max_event_age=timedelta(days=settings.max_event_age_days),
     )
     application.dependency_overrides[get_telemetry_repository] = lambda: repository
+    application.dependency_overrides[get_inference_port] = lambda: inference
     return application
 
 
@@ -67,10 +79,13 @@ def client(app: FastAPI) -> TestClient:
 
 
 @pytest.fixture
-def live_client(repository: InMemoryTelemetryRepository) -> TestClient:
-    """Real clock and real settings, but still no database connection."""
-    application = create_app(lifespan_handler=_no_database)
+def live_client(
+    repository: InMemoryTelemetryRepository, inference: StubInferencePort
+) -> TestClient:
+    """Real clock and real settings, but no database and no HTTP calls."""
+    application = create_app(lifespan_handler=_no_external_services)
     application.dependency_overrides[get_telemetry_repository] = lambda: repository
+    application.dependency_overrides[get_inference_port] = lambda: inference
     return TestClient(application)
 
 

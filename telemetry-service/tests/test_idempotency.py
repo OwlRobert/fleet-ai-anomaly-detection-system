@@ -9,20 +9,29 @@ from datetime import timedelta
 import pytest
 
 from app.application.errors import DuplicateEventIdError, PersistenceUnavailableError
+from app.domain.inference import InferenceErrorCode, InferenceStatus
 from app.application.ingest_telemetry import IngestTelemetry
 from app.domain.normalizer import TelemetryNormalizer
 from app.domain.units import MetricName
 from tests.factories import FIXED_NOW, one_metric, source_event
-from tests.fakes import InMemoryTelemetryRepository
+from app.domain.inference import InferenceOutcome
+from app.domain.stored import StoredTelemetryEvent
+from tests.fakes import InMemoryTelemetryRepository, StubInferencePort
 
 pytestmark = pytest.mark.anyio
 
 EVENT_ID = "3f0a9c2e-6f4b-4a6f-9d6e-2b1c8f4a77e1"
 
 
-def use_case(repository: InMemoryTelemetryRepository, now=FIXED_NOW) -> IngestTelemetry:
+def use_case(
+    repository: InMemoryTelemetryRepository,
+    now=FIXED_NOW,
+    inference: StubInferencePort | None = None,
+) -> IngestTelemetry:
     return IngestTelemetry(
-        normalizer=TelemetryNormalizer(clock=lambda: now), repository=repository
+        normalizer=TelemetryNormalizer(clock=lambda: now),
+        inference=inference if inference is not None else StubInferencePort(),
+        repository=repository,
     )
 
 
@@ -225,3 +234,96 @@ def _stored(repository: InMemoryTelemetryRepository, event):
         transport="rest",
         api_version="v1",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Inference and the duplicate paths
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_retry_never_re_scores_a_stored_event() -> None:
+    """The short-circuit lookup runs before inference, so a retry is free."""
+    repository = InMemoryTelemetryRepository()
+    model = StubInferencePort()
+
+    await use_case(repository, inference=model).execute(source_event())
+    await use_case(repository, inference=model).execute(source_event())
+    await use_case(repository, inference=model).execute(source_event())
+
+    assert model.call_count == 1
+    assert len(repository.events) == 1
+
+
+async def test_a_lost_race_keeps_the_winners_verdict() -> None:
+    """Both racers may score; only the first write survives, verdict and all.
+
+    Without a distributed lock two concurrent requests can both call inference
+    before the unique index resolves the race. That is an accepted trade-off:
+    the extra call is wasted work, never a second record or a changed verdict.
+    """
+    repository = InMemoryTelemetryRepository()
+    winner = StubInferencePort(is_anomaly=True, anomaly_score=0.42)
+    loser = StubInferencePort(is_anomaly=False, anomaly_score=-0.99)
+    competitor = source_event(event_id=EVENT_ID)
+
+    def concurrent_writer() -> None:
+        repository.before_save = None
+        repository.events.append(
+            StoredTelemetryEvent(
+                event=TelemetryNormalizer(clock=lambda: FIXED_NOW).normalize(competitor),
+                inference=InferenceOutcome.completed(
+                    is_anomaly=True, anomaly_score=0.42,
+                    model_name="isolation-forest-telemetry", model_version="0.1.0",
+                ),
+                transport="rest",
+                api_version="v1",
+            )
+        )
+
+    repository.before_save = concurrent_writer
+
+    outcome = await use_case(repository, inference=loser).execute(source_event(event_id=EVENT_ID))
+
+    assert outcome.duplicate is True
+    assert outcome.conflict is False
+    assert outcome.stored.inference.anomaly_score == 0.42
+    assert len(repository.events) == 1
+    assert loser.call_count == 1  # it did score, and its answer was discarded
+
+
+async def test_a_lost_race_with_conflicting_content_keeps_the_original() -> None:
+    repository = InMemoryTelemetryRepository()
+    competitor = source_event(event_id=EVENT_ID, vehicle_id="veh-cz-0007")
+
+    def concurrent_writer() -> None:
+        repository.before_save = None
+        repository.events.append(
+            StoredTelemetryEvent(
+                event=TelemetryNormalizer(clock=lambda: FIXED_NOW).normalize(competitor),
+                inference=InferenceOutcome.failed(InferenceErrorCode.TIMEOUT),
+                transport="rest",
+                api_version="v1",
+            )
+        )
+
+    repository.before_save = concurrent_writer
+
+    outcome = await use_case(repository).execute(source_event(event_id=EVENT_ID))
+
+    assert outcome.conflict is True
+    assert outcome.stored.event.vehicle_id == "veh-cz-0007"
+    assert outcome.stored.inference.status is InferenceStatus.FAILED
+    assert len(repository.events) == 1
+
+
+async def test_a_failed_verdict_is_preserved_across_retries() -> None:
+    repository = InMemoryTelemetryRepository()
+    model = StubInferencePort(fail_with=InferenceErrorCode.UNREACHABLE)
+
+    first = await use_case(repository, inference=model).execute(source_event())
+    model.fail_with = None
+    retry = await use_case(repository, inference=model).execute(source_event())
+
+    assert first.stored.inference.status is InferenceStatus.FAILED
+    assert retry.stored.inference.error_code == "INFERENCE_UNREACHABLE"
+    assert model.call_count == 1

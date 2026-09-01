@@ -1,5 +1,7 @@
 """Application-layer errors."""
 
+from app.domain.inference import InferenceErrorCode
+
 class CapabilityNotImplementedError(RuntimeError):
     """A capability defined by the architecture is not implemented yet.
 
@@ -21,6 +23,19 @@ class PersistenceUnavailableError(RuntimeError):
     accepted, so its retry — safe by ``event_id`` idempotency — is the recovery
     mechanism. Acknowledging an event that was never stored would lose it.
     """
+
+
+class InferenceFailedError(RuntimeError):
+    """Inference did not return a usable verdict.
+
+    Ingestion is **fail-open** on this: the telemetry is still stored, with
+    ``inference.status = FAILED`` and this error code. The message is for the
+    logs; only ``error_code`` is ever exposed.
+    """
+
+    def __init__(self, error_code: InferenceErrorCode, detail: str) -> None:
+        super().__init__(f"{error_code.value}: {detail}")
+        self.error_code = error_code
 
 
 class DuplicateEventIdError(RuntimeError):

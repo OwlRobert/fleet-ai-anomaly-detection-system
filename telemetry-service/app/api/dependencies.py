@@ -13,7 +13,7 @@ from fastapi import Depends, Request
 
 from app.application.errors import PersistenceUnavailableError
 from app.application.ingest_telemetry import IngestTelemetry
-from app.application.ports import TelemetryRepository
+from app.application.ports import InferencePort, TelemetryRepository
 from app.core.config import Settings, get_settings
 from app.domain.normalizer import TelemetryNormalizer
 
@@ -39,9 +39,18 @@ def get_telemetry_repository(request: Request) -> TelemetryRepository:
     return repository
 
 
+def get_inference_port(request: Request) -> InferencePort:
+    """Provide the inference client built once at application startup."""
+    inference = getattr(request.app.state, "inference_port", None)
+    if inference is None:
+        raise RuntimeError("inference client is not configured")
+    return inference
+
+
 def get_ingest_telemetry(
     normalizer: Annotated[TelemetryNormalizer, Depends(get_telemetry_normalizer)],
+    inference: Annotated[InferencePort, Depends(get_inference_port)],
     repository: Annotated[TelemetryRepository, Depends(get_telemetry_repository)],
 ) -> IngestTelemetry:
     """Provide the telemetry ingestion use case."""
-    return IngestTelemetry(normalizer=normalizer, repository=repository)
+    return IngestTelemetry(normalizer=normalizer, inference=inference, repository=repository)

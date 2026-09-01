@@ -3,6 +3,7 @@
 from datetime import timedelta
 from fastapi.testclient import TestClient
 
+from app.domain.inference import InferenceErrorCode, InferenceOutcome
 from tests.factories import FIXED_NOW, scored, stored_event
 from tests.fakes import InMemoryTelemetryRepository
 
@@ -216,3 +217,44 @@ def test_anomalies_filter_by_vehicle(
     )
 
     assert ids(client.get(ANOMALIES_URL, params=window())) == ["ours"]
+
+
+def test_failed_and_pending_events_are_excluded_from_anomalies(
+    client: TestClient, repository: InMemoryTelemetryRepository
+) -> None:
+    """Only a completed run's `true` counts. Absence of a verdict is not a verdict."""
+    repository.events.extend(
+        [
+            stored_event(event_id="anomalous", inference=scored(is_anomaly=True)),
+            stored_event(event_id="scored-normal", inference=scored(is_anomaly=False)),
+            stored_event(event_id="failed", inference=InferenceOutcome.failed(InferenceErrorCode.TIMEOUT)),
+            stored_event(event_id="legacy-pending"),
+        ]
+    )
+
+    assert ids(client.get(ANOMALIES_URL, params=window())) == ["anomalous"]
+
+
+def test_history_returns_every_state(
+    client: TestClient, repository: InMemoryTelemetryRepository
+) -> None:
+    repository.events.extend(
+        [
+            stored_event(event_id="anomalous", inference=scored(is_anomaly=True)),
+            stored_event(event_id="scored-normal", inference=scored(is_anomaly=False)),
+            stored_event(event_id="failed", inference=InferenceOutcome.failed(InferenceErrorCode.UNAVAILABLE)),
+            stored_event(event_id="legacy-pending"),
+        ]
+    )
+
+    statuses = {
+        item["event_id"]: item["inference"]["status"]
+        for item in client.get(HISTORY_URL, params=window()).json()["items"]
+    }
+
+    assert statuses == {
+        "anomalous": "COMPLETED",
+        "scored-normal": "COMPLETED",
+        "failed": "FAILED",
+        "legacy-pending": "PENDING",
+    }
