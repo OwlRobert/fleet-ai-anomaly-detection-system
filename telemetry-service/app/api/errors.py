@@ -8,6 +8,7 @@ Every error response uses the envelope defined in the architecture:
 carries no contract weight. Python exceptions never reach the client.
 """
 
+import logging
 from typing import Any, Final
 
 from fastapi import FastAPI, Request, status
@@ -16,6 +17,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.application.errors import CapabilityNotImplementedError, PersistenceUnavailableError
+
+logger = logging.getLogger(__name__)
 from app.domain.errors import (
     ClockSkewError,
     ClockSkewFutureError,
@@ -34,6 +37,9 @@ INVALID_TIME_RANGE: Final = "INVALID_TIME_RANGE"
 CLOCK_SKEW_FUTURE: Final = "CLOCK_SKEW_FUTURE"
 EVENT_TOO_OLD: Final = "EVENT_TOO_OLD"
 PERSISTENCE_UNAVAILABLE: Final = "PERSISTENCE_UNAVAILABLE"
+
+#: Last resort, so an unforeseen failure still answers in the contract's shape.
+INTERNAL_ERROR: Final = "INTERNAL_ERROR"
 
 #: Which contract code each normalization rejection maps to. The domain raises
 #: a typed error and stays free of API vocabulary; the mapping lives here.
@@ -151,6 +157,10 @@ async def _handle_persistence_unavailable(
     ``event_id`` idempotency — is the recovery path. Driver exception names,
     hostnames and connection strings never appear in the response.
     """
+    logger.warning(
+        "telemetry store unavailable; request not acknowledged",
+        extra={"error_code": PERSISTENCE_UNAVAILABLE},
+    )
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content=_envelope(
@@ -173,9 +183,25 @@ async def _handle_not_implemented(_: Request, exc: CapabilityNotImplementedError
     )
 
 
+async def _handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+    """Anything unforeseen becomes the same envelope every other error uses.
+
+    The exception and its traceback go to the log; the client gets a code and
+    nothing else. Without this, an unhandled error would answer with a bare
+    ``Internal Server Error`` string, breaking the one error shape every other
+    response keeps.
+    """
+    logger.exception("unhandled error while serving a request")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=_envelope(INTERNAL_ERROR, "An unexpected internal error occurred."),
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach the envelope handlers to the application."""
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(NormalizationError, _handle_normalization_error)
     app.add_exception_handler(PersistenceUnavailableError, _handle_persistence_unavailable)
     app.add_exception_handler(CapabilityNotImplementedError, _handle_not_implemented)
+    app.add_exception_handler(Exception, _handle_unexpected_error)

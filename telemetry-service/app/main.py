@@ -1,5 +1,6 @@
 """Telemetry Service application factory."""
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -8,12 +9,16 @@ from fastapi import FastAPI
 from app.api.errors import register_exception_handlers
 from app.api.routes import health, telemetry, vehicles
 from app.core.config import Settings, get_settings
+from app.core.logging import configure_logging
+from app.core.request_id import RequestIdMiddleware
 from app.infrastructure.http_inference_client import (
     HttpInferenceClient,
     create_inference_client,
 )
 from app.infrastructure.mongo import create_client, ensure_indexes, get_collection
 from app.infrastructure.telemetry_repository import MongoTelemetryRepository
+
+logger = logging.getLogger(__name__)
 
 DESCRIPTION = """
 Ingestion and query API for multinational EV fleet telemetry.
@@ -50,7 +55,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ingestion fails closed with `503` until the store comes back.
     """
     settings: Settings = get_settings()
-    client = create_client(settings.mongodb_uri, settings.mongodb_timeout_ms)
+    logger.info(
+        "telemetry service starting",
+        extra={"version": settings.version, "database": settings.mongodb_database},
+    )
+    client = create_client(settings.mongodb_uri.get_secret_value(), settings.mongodb_timeout_ms)
     collection = get_collection(client[settings.mongodb_database], settings.mongodb_telemetry_collection)
 
     inference_client = create_inference_client(
@@ -65,12 +74,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await ensure_indexes(collection)
     except Exception:  # noqa: BLE001 - an unreachable store must not stop the process
         app.state.indexes_ready = False
+        logger.warning(
+            "telemetry store unreachable at startup; indexes not ensured. "
+            "Ingestion will fail closed until it recovers"
+        )
     else:
         app.state.indexes_ready = True
+        logger.info("telemetry store reachable; indexes ensured")
 
     try:
         yield
     finally:
+        logger.info("telemetry service shutting down; closing clients")
         await inference_client.aclose()
         await client.close()
 
@@ -78,6 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(*, lifespan_handler=lifespan) -> FastAPI:
     """Build the FastAPI application."""
     settings = get_settings()
+    configure_logging(settings.log_level, settings.log_format)
     app = FastAPI(
         title="Fleet Telemetry Service",
         version=settings.version,
@@ -85,6 +101,7 @@ def create_app(*, lifespan_handler=lifespan) -> FastAPI:
         description=DESCRIPTION,
         lifespan=lifespan_handler,
     )
+    app.add_middleware(RequestIdMiddleware)
     register_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(telemetry.router)

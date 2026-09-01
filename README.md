@@ -415,6 +415,29 @@ before it becomes a verdict, so a malformed one is recorded as `FAILED` rather t
 An inference outage never makes the Telemetry Service unready — `/health/ready` checks only the
 telemetry store, because ingestion is fail-closed on persistence and fail-open on inference.
 
+### Logs and correlation
+
+Logs are **structured JSON** on stdout by default (`LOG_FORMAT=text` for local reading,
+`LOG_LEVEL` to change verbosity). Operational lines carry the identifiers that make them
+actionable — `event_id`, `vehicle_id`, `site_id`, `error_code` — rather than prose alone:
+
+```json
+{"timestamp": "...", "level": "WARNING", "logger": "app.application.ingest_telemetry",
+ "message": "storing telemetry without a verdict; inference did not complete",
+ "request_id": "p7-trace-outage", "event_id": "evt-91", "vehicle_id": "veh-tw-0142",
+ "site_id": "site-taipei-01", "error_code": "INFERENCE_UNREACHABLE"}
+```
+
+Every request carries an **`X-Request-ID`**: supplied by the caller or generated, echoed in the
+response, attached to the logs, and forwarded to the Inference Service — so one id ties an ingest
+request to the prediction it triggered. Request bodies, credentials and connection strings are
+never logged, and tracebacks stay in the log rather than in a response body.
+
+Configuration is validated at startup. A timeout of zero, a default page size larger than the
+maximum, an empty database name, an inference URL with no scheme, or an empty model expectation
+stops the process with a clear message instead of failing confusingly later. The MongoDB URI is
+held as a secret, so it cannot appear in a log line or a validation error.
+
 ```bash
 # both services, pointed at each other
 cd inference-service && PYTHONPATH=. uvicorn app.main:app --port 8001

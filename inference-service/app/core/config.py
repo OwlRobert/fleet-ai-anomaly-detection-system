@@ -8,12 +8,14 @@ never silently renamed.
 The configured name and version are *expectations*, checked against the artifact
 at load time so a deployment pointed at the wrong file fails loudly. What
 `/model/info` publishes always comes from the artifact itself, never from these.
+They may not be empty: an empty expectation would silently match nothing.
 """
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVICE_NAME = "inference-service"
@@ -40,13 +42,34 @@ class Settings(BaseSettings):
     model_name: str = Field(
         default="isolation-forest-telemetry",
         validation_alias="MODEL_NAME",
+        min_length=1,
         description="Model name the artifact is required to declare.",
     )
     model_version: str = Field(
         default="0.1.0",
         validation_alias="MODEL_VERSION",
+        min_length=1,
         description="Model version the artifact is required to declare.",
     )
+
+    log_level: str = Field(
+        default="INFO",
+        validation_alias="LOG_LEVEL",
+        pattern=r"^(?i:CRITICAL|ERROR|WARNING|INFO|DEBUG)$",
+        description="Root log level.",
+    )
+    log_format: Literal["json", "text"] = Field(
+        default="json",
+        validation_alias="LOG_FORMAT",
+        description="`json` for collectors, `text` for reading locally.",
+    )
+
+    @model_validator(mode="after")
+    def _check_artifact_path(self) -> Self:
+        """An empty path silently becomes ``.``, which is never an artifact."""
+        if not str(self.model_artifact_path).strip() or str(self.model_artifact_path) == ".":
+            raise ValueError("MODEL_ARTIFACT_PATH must name a file")
+        return self
 
 
 @lru_cache

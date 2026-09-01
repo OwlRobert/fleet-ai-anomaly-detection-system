@@ -23,6 +23,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.application.errors import InferenceFailedError
+from app.core.request_id import REQUEST_ID_HEADER, current_request_id
 from app.domain.inference import InferenceErrorCode, InferenceOutcome
 from app.domain.units import MetricName
 
@@ -66,8 +67,15 @@ class HttpInferenceClient:
         """
         payload = {"features": {metric.value: float(value) for metric, value in features.items()}}
 
+        # Carry the correlation id across the service boundary, so one id ties
+        # an ingest request to the prediction it triggered.
+        headers = {}
+        request_id = current_request_id()
+        if request_id:
+            headers[REQUEST_ID_HEADER] = request_id
+
         try:
-            response = await self._client.post(PREDICT_PATH, json=payload)
+            response = await self._client.post(PREDICT_PATH, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             raise self._failure(InferenceErrorCode.TIMEOUT, "request timed out", exc) from exc
         except httpx.TransportError as exc:

@@ -906,9 +906,10 @@ the uniqueness constraint and returns `200 OK` with `duplicate: true`
 ([§9](#9-event-identity-and-idempotency)).
 
 **Timeout and retry policy.** One inference attempt per ingest, with a bounded timeout
-(`INFERENCE_TIMEOUT_SECONDS`, default 2 s, applied to connect and read alike). No in-request
-retries: retrying inside a synchronous request multiplies tail latency while the client is blocked,
-and the client's own retry already covers the transient case. A circuit breaker and a backfill job
+(`INFERENCE_TIMEOUT_SECONDS`, default 2 s, applied to connect, read, write and pool alike, and
+regression-tested against a socket that accepts and never answers). No in-request retries: retrying
+inside a synchronous request multiplies tail latency while the client is blocked, and the client's
+own retry already covers the transient case. A circuit breaker and a backfill job
 that re-scores `FAILED` events are natural additions, both enabled by `inference.status` being
 recorded rather than inferred.
 
@@ -1053,16 +1054,26 @@ telemetry through `vehicle_id` and `site_id`.
 
 ## 15. Observability
 
-MVP: **structured JSON logs**, standard library logging, one line per ingest, carrying
-`event_id`, `vehicle_id`, `site_id`, `transport`, `schema_version`, `inference.status`, inference
-latency, total request latency, and the ingest-to-event delay (`received_at − event_time`). That
-last field is the one that makes regional delivery problems visible without any additional
-infrastructure.
+**Structured JSON logs**, standard library logging only. `LOG_FORMAT` selects `json` (default) or
+`text`; `LOG_LEVEL` sets verbosity. A formatter renders whatever context a caller attaches, so
+operational lines carry `event_id`, `vehicle_id`, `site_id` and `error_code` rather than prose
+alone — without it those identifiers are silently dropped, which is exactly when a log line stops
+being useful.
 
-An `X-Request-ID` header is accepted and echoed for correlation; if absent, one is generated.
+Logged at present: service startup and shutdown, telemetry store unreachable at startup, each
+inference failure with its error code, each fail-open persist, each persistence failure, and
+`event_id` reuse with different content. Not logged: request bodies, credentials, environment, or
+the connection string — which is held as a `SecretStr` so it cannot reach a log line or a
+validation error. Tracebacks go to the log; responses carry an error code and nothing else.
 
-Future: metrics (ingest rate, inference failure rate, skew distribution per site), distributed
-tracing across the two services, and per-region dashboards. Not in the MVP.
+An **`X-Request-ID`** is accepted and echoed, generated when absent, attached to every log line
+through a `ContextVar`, and forwarded to the Inference Service, so one id spans both services. One
+middleware and one context variable — no tracing framework.
+
+Deliberately absent: per-request latency measurement, ingest-to-event delay as a metric, metrics
+endpoints, and distributed tracing. This is log-level observability, not an observability platform.
+Metrics (ingest rate, inference failure rate, skew distribution per site), tracing and per-region
+dashboards remain future work.
 
 ---
 

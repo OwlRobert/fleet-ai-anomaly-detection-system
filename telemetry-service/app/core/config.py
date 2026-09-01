@@ -8,8 +8,9 @@ documents, which carry no service prefix; `validation_alias` bypasses
 """
 
 from functools import lru_cache
+from typing import Literal, Self
 
-from pydantic import Field
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVICE_NAME = "telemetry-service"
@@ -40,19 +41,22 @@ class Settings(BaseSettings):
         description="How far behind received_at an event_time may sit before EVENT_TOO_OLD.",
     )
 
-    mongodb_uri: str = Field(
-        default="mongodb://localhost:27017",
+    mongodb_uri: SecretStr = Field(
+        default=SecretStr("mongodb://localhost:27017"),
         validation_alias="MONGODB_URI",
-        description="Connection string for the telemetry event store.",
+        min_length=1,
+        description="Connection string for the telemetry event store. May carry credentials.",
     )
     mongodb_database: str = Field(
         default="fleet_telemetry",
         validation_alias="MONGODB_DATABASE",
+        min_length=1,
         description="Database holding the telemetry collection.",
     )
     mongodb_telemetry_collection: str = Field(
         default="telemetry_events",
         validation_alias="MONGODB_TELEMETRY_COLLECTION",
+        min_length=1,
         description="Collection of telemetry event documents.",
     )
     mongodb_timeout_seconds: float = Field(
@@ -65,6 +69,7 @@ class Settings(BaseSettings):
     inference_service_url: str = Field(
         default="http://localhost:8001",
         validation_alias="INFERENCE_SERVICE_URL",
+        pattern=r"^https?://.+",
         description="Base URL of the Inference Service.",
     )
     inference_timeout_seconds: float = Field(
@@ -86,6 +91,27 @@ class Settings(BaseSettings):
         validation_alias="TELEMETRY_QUERY_MAX_LIMIT",
         description="Maximum page size for the vehicle history endpoints.",
     )
+
+    log_level: str = Field(
+        default="INFO",
+        validation_alias="LOG_LEVEL",
+        pattern=r"^(?i:CRITICAL|ERROR|WARNING|INFO|DEBUG)$",
+        description="Root log level.",
+    )
+    log_format: Literal["json", "text"] = Field(
+        default="json",
+        validation_alias="LOG_FORMAT",
+        description="`json` for collectors, `text` for reading locally.",
+    )
+
+    @model_validator(mode="after")
+    def _check_query_limits(self) -> Self:
+        """A default page larger than the maximum can never be served."""
+        if self.query_default_limit > self.query_max_limit:
+            raise ValueError(
+                "TELEMETRY_QUERY_DEFAULT_LIMIT must not exceed TELEMETRY_QUERY_MAX_LIMIT"
+            )
+        return self
 
     @property
     def mongodb_timeout_ms(self) -> int:

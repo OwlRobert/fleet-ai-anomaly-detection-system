@@ -11,6 +11,8 @@ from app.api.routes import health, model, prediction
 from app.application.inference_service import InferenceService
 from app.core.config import Settings, get_settings
 from app.core.errors import ArtifactLoadError
+from app.core.logging import configure_logging
+from app.core.request_id import RequestIdMiddleware
 from app.infrastructure.artifact import load_artifact
 from app.infrastructure.isolation_forest_model import IsolationForestAnomalyModel
 
@@ -47,14 +49,20 @@ def build_inference_service(settings: Settings) -> InferenceService:
             expected_version=settings.model_version,
         )
     except ArtifactLoadError as exc:
-        logger.error("model artifact could not be loaded: %s", exc)
+        # The path may appear here; that is fine in a log and never in a response.
+        logger.error(
+            "model artifact could not be loaded; this instance cannot serve predictions",
+            extra={"detail": str(exc)},
+        )
         return InferenceService(model=None)
 
     logger.info(
-        "loaded model %s %s (sha256 %s)",
-        artifact.metadata.model_name,
-        artifact.metadata.model_version,
-        artifact.metadata.artifact_sha256[:12],
+        "model artifact loaded",
+        extra={
+            "model_name": artifact.metadata.model_name,
+            "model_version": artifact.metadata.model_version,
+            "artifact_sha256": artifact.metadata.artifact_sha256[:12],
+        },
     )
     return InferenceService(model=IsolationForestAnomalyModel(artifact))
 
@@ -66,13 +74,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Loading here rather than per request is the whole point: an IsolationForest
     is deserialized once and then reused by every prediction.
     """
-    app.state.inference_service = build_inference_service(get_settings())
-    yield
+    settings = get_settings()
+    logger.info("inference service starting", extra={"version": settings.version})
+    app.state.inference_service = build_inference_service(settings)
+    try:
+        yield
+    finally:
+        logger.info("inference service shutting down")
 
 
 def create_app(*, lifespan_handler=lifespan) -> FastAPI:
     """Build the FastAPI application."""
     settings = get_settings()
+    configure_logging(settings.log_level, settings.log_format)
     app = FastAPI(
         title="Fleet Inference Service",
         version=settings.version,
@@ -80,6 +94,7 @@ def create_app(*, lifespan_handler=lifespan) -> FastAPI:
         description=DESCRIPTION,
         lifespan=lifespan_handler,
     )
+    app.add_middleware(RequestIdMiddleware)
     register_exception_handlers(app)
     app.include_router(health.router)
     app.include_router(model.router)

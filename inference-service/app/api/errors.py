@@ -8,6 +8,7 @@ Only the codes this service can currently emit are defined. ``MODEL_NOT_LOADED``
 arrives with model loading, which does not exist yet.
 """
 
+import logging
 from typing import Any, Final
 
 from fastapi import FastAPI, Request, status
@@ -17,8 +18,13 @@ from pydantic import BaseModel, Field
 
 from app.core.errors import ModelNotLoadedError
 
+logger = logging.getLogger(__name__)
+
 SCHEMA_VALIDATION_FAILED: Final = "SCHEMA_VALIDATION_FAILED"
 MODEL_NOT_LOADED: Final = "MODEL_NOT_LOADED"
+
+#: Last resort, so an unforeseen failure still answers in the contract's shape.
+INTERNAL_ERROR: Final = "INTERNAL_ERROR"
 
 
 class Error(BaseModel):
@@ -101,7 +107,23 @@ async def _handle_model_not_loaded(_: Request, exc: ModelNotLoadedError) -> JSON
     )
 
 
+async def _handle_unexpected_error(_: Request, exc: Exception) -> JSONResponse:
+    """Anything unforeseen becomes the same envelope every other error uses.
+
+    The exception and its traceback go to the log; the client gets a code and
+    nothing else. Without this, an unhandled error would answer with a bare
+    ``Internal Server Error`` string, breaking the one error shape every other
+    response keeps.
+    """
+    logger.exception("unhandled error while serving a request")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=_envelope(INTERNAL_ERROR, "An unexpected internal error occurred."),
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach the envelope handlers to the application."""
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(ModelNotLoadedError, _handle_model_not_loaded)
+    app.add_exception_handler(Exception, _handle_unexpected_error)
