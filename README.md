@@ -71,7 +71,117 @@ flowchart TD
 
 ---
 
-## 3. MVP scope
+## 3. Running it locally
+
+Everything — both services and MongoDB — comes up with one command. The only
+prerequisite is Docker with Compose v2 (`docker compose version`).
+
+```bash
+docker compose up --build
+```
+
+That builds both images, **trains the anomaly model as part of the inference
+image build**, starts MongoDB, and wires the three together. No manual step, no
+model file to create first, nothing to install locally.
+
+| | URL |
+| --- | --- |
+| Telemetry Service | <http://localhost:8000> — [Swagger](http://localhost:8000/docs) · [OpenAPI](http://localhost:8000/openapi.json) |
+| Inference Service | <http://localhost:8001> — [Swagger](http://localhost:8001/docs) · [OpenAPI](http://localhost:8001/openapi.json) |
+| MongoDB | `mongodb://localhost:27017` — exposed for inspection |
+
+Health endpoints:
+
+```bash
+curl localhost:8000/health          # liveness: is the process up
+curl localhost:8000/health/ready    # readiness: can it reach the telemetry store
+curl localhost:8001/health          # liveness + whether a model is loaded
+curl localhost:8001/model/info      # the loaded artifact's identity and feature order
+```
+
+Send one event — in **source units**, to watch normalization happen:
+
+```bash
+curl -X POST localhost:8000/api/v1/telemetry -H 'Content-Type: application/json' -d '{
+  "schema_version": "1.0",
+  "event_id": "demo-0001",
+  "vehicle_id": "veh-tw-0142",
+  "site_id": "site-taipei-01",
+  "event_time": "2026-09-01T22:00:00+08:00",
+  "metrics": {
+    "soc":                 {"value": 62.0,   "unit": "percent"},
+    "battery_voltage":     {"value": 378.0,  "unit": "V"},
+    "battery_current":     {"value": -190.0, "unit": "A"},
+    "battery_temperature": {"value": 84.2,   "unit": "degF"},
+    "speed":               {"value": 39.15,  "unit": "mph"},
+    "motor_rpm":           {"value": 5170.0, "unit": "rpm"}
+  }
+}'
+```
+
+It comes back `201` with `speed` in km/h, `battery_temperature` in degC, and the
+model's verdict. Then read it back:
+
+```bash
+curl "localhost:8000/api/v1/vehicles/veh-tw-0142/telemetry?start=2026-08-01T00:00:00Z&end=2026-12-01T00:00:00Z"
+curl "localhost:8000/api/v1/vehicles/veh-tw-0142/anomalies?start=2026-08-01T00:00:00Z&end=2026-12-01T00:00:00Z"
+```
+
+### Inspecting and stopping
+
+```bash
+docker compose ps                          # container state and health
+docker compose logs -f                     # follow everything
+docker compose logs -f telemetry-service   # one service
+docker compose logs -f inference-service
+
+docker compose down       # stop and remove containers + network — MongoDB data KEPT
+docker compose down -v    # the same, and DELETE the MongoDB volume
+```
+
+The distinction matters: telemetry lives in the named volume `mongodb-data`, so
+it survives `docker compose down`, `docker compose restart`, and container
+crashes. Only `down -v` throws it away — which is the deliberate way to start
+from an empty database.
+
+### The model artifact
+
+```text
+source code → docker build → ml/train.py → model.joblib inside the image
+            → container start → artifact loaded once → predictions served
+```
+
+Training happens **once, during the image build**. The service never trains at
+startup and never in a request handler, so training and serving stay separate.
+Training is deterministic — fixed seeds and explicit hyperparameters — so the
+same source always produces the same model. That is why the ~20 MB artifact is
+not in Git: it is reproducible from the source that is.
+
+Rebuilding from scratch, including retraining:
+
+```bash
+docker compose build --no-cache
+```
+
+### If port 8000, 8001 or 27017 is already taken
+
+The host ports default to those values and can be overridden:
+
+```bash
+TELEMETRY_HOST_PORT=18000 INFERENCE_HOST_PORT=18001 MONGODB_HOST_PORT=37017 docker compose up -d
+```
+
+Only the host side moves; inside the network the services always reach each
+other at `mongodb:27017` and `inference-service:8001`.
+
+### Running without Docker
+
+Each service also runs directly, which is how the test suites run. See
+[§10](#10-the-anomaly-model) for training and serving the model by hand.
+
+---
+
+## 4. MVP scope
 
 ### Telemetry Service
 
@@ -94,7 +204,7 @@ Full request/response contracts: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#6
 
 ---
 
-## 4. Telemetry input contract
+## 5. Telemetry input contract
 
 Every event carries an identity, a source, a timezone-aware timestamp, and metrics with
 **per-metric explicit units**. Units are *not* a request-level `"metric"` / `"imperial"` flag — a
@@ -146,7 +256,7 @@ Why both timestamps exist, how clock skew is validated, and how out-of-order eve
 
 ---
 
-## 5. Key decisions
+## 6. Key decisions
 
 Recorded as concise ADRs in [`docs/DECISIONS.md`](docs/DECISIONS.md):
 
@@ -181,18 +291,21 @@ The two that most shape day-to-day behavior:
 
 ---
 
-## 6. Repository layout
+## 7. Repository layout
 
 ```text
+compose.yaml        # the whole stack: mongodb + inference-service + telemetry-service
 telemetry-service/
+  Dockerfile
   app/
     api/routes/     # FastAPI routers, request/response schemas, error mapping
-    application/    # IngestTelemetry use case, TelemetryRepository port
+    application/    # IngestTelemetry use case, TelemetryRepository + InferencePort
     domain/         # source + canonical models, units, conversions, normalizer
-    infrastructure/ # MongoDB client, indexes, repository, document mapping
+    infrastructure/ # MongoDB client, indexes, repository, HTTP inference client
     core/           # settings
   tests/
 inference-service/
+  Dockerfile        # trains the model during the build
   app/
     api/routes/     # FastAPI routers, canonical feature schemas, error mapping
     application/    # InferenceService
@@ -213,7 +326,7 @@ of the code that fills them.
 
 ---
 
-## 7. Roadmap
+## 8. Roadmap
 
 | Phase | Content |
 | --- | --- |
@@ -222,14 +335,15 @@ of the code that fills them.
 | 2 | Telemetry normalization — `CanonicalTelemetryEvent`, `TelemetryNormalizer`, unit conversion, UTC + `received_at`, clock-skew bounds |
 | 3 | MongoDB persistence and idempotency — `TelemetryRepository`, unique `event_id`, duplicate/conflict handling, indexes, history and anomaly queries |
 | 4 | Anomaly model and Inference Service — synthetic training data, IsolationForest training, joblib artifact, load-time validation, real `/predict` and `/model/info` |
-| 5 | **Telemetry ↔ inference integration (current)** — `InferencePort`, HTTP client, synchronous scoring, fail-open inference, `COMPLETED`/`FAILED` persistence |
-| 6+ | Simulator, and the concerns listed as future below |
+| 5 | Telemetry ↔ inference integration — `InferencePort`, HTTP client, synchronous scoring, fail-open inference, `COMPLETED`/`FAILED` persistence |
+| 6 | **Containerization (current)** — Dockerfiles, Docker Compose, MongoDB volume, healthchecks, model trained at image build |
+| 7+ | Simulator, and the concerns listed as future below |
 
 Sequencing beyond the current phase is decided per phase, not fixed here.
 
 ---
 
-## 8. Explicitly out of scope for the MVP
+## 9. Explicitly out of scope for the MVP
 
 Frontend · authentication/RBAC · MQTT · Redis · Kafka · Celery · Kubernetes · AWS · WebSocket /
 Socket.IO · alert engine · OCPP · charging simulator · model registry · multi-region deployment ·
@@ -241,7 +355,7 @@ nowhere.
 
 ---
 
-## 9. The anomaly model
+## 10. The anomaly model
 
 **IsolationForest**, trained offline on synthetic data, served by the Inference Service.
 
@@ -333,12 +447,12 @@ PYTHONPATH=. uvicorn app.main:app --port 8001
 
 ---
 
-## 10. Configuration
+## 11. Configuration
 
 `.env.example` documents the full configuration surface of both services. It contains no secrets
 and is the only environment file committed to the repository.
 
-## 11. Documentation
+## 12. Documentation
 
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, contracts, data model, failure
   policy, multinational concerns, extension points.

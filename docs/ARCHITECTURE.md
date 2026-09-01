@@ -81,6 +81,19 @@ flowchart LR
     OPS["Operator or API client"] -->|"GET telemetry / anomalies"| TS
 ```
 
+**How it runs locally.** `docker compose up --build` starts exactly these three containers on one
+Compose network, where they address each other by service name — `mongodb:27017` and
+`inference-service:8001` — never `localhost`. Those addresses arrive as environment variables, so
+no Docker-specific hostname is compiled into application code. MongoDB keeps its data in a named
+volume that survives `docker compose down`; `docker compose down -v` is the deliberate way to
+discard it. The model artifact is trained into the Inference Service image during the build
+([ADR-0010](DECISIONS.md#adr-0010-train-the-model-during-the-image-build)).
+
+Healthchecks follow the same asymmetry as the failure policy. MongoDB and the Inference Service are
+both checked, but the Telemetry Service waits only for MongoDB to be *healthy* before starting —
+the Inference Service is `service_started`, because ingestion is fail-open on inference and must
+never be held up by it.
+
 **Why two services rather than one process.** The split is deliberate and is the point of the
 exercise: it forces an explicit inference *boundary* with its own contract, versioning surface
 (`/model/info`), independent lifecycle, and — most importantly — a real failure mode to design
@@ -226,22 +239,29 @@ independent failure modes.* Anything else stays concrete.
 
 ## 5. Code layout
 
-Two independently runnable services, each with its own requirements and test suite.
+Two independently runnable services, each with its own requirements, Dockerfile and test suite,
+plus one Compose file that runs them together with MongoDB.
 
 ```text
+compose.yaml              # mongodb + inference-service + telemetry-service
 telemetry-service/
+  Dockerfile
   app/
     api/routes/           # FastAPI routers, request/response schemas, error mapping
-    application/          # IngestTelemetry, TelemetryRepository port
+    application/          # IngestTelemetry, TelemetryRepository + InferencePort
     domain/               # source + canonical models, units, conversions, TelemetryNormalizer
-    infrastructure/       # MongoDB client, indexes, repository, document mapping
+    infrastructure/       # MongoDB client, indexes, repository, HTTP inference client
     core/                 # settings
   tests/
 inference-service/
+  Dockerfile              # trains the model during the build
   app/
     api/routes/           # /health, /model/info, /predict, canonical feature schemas
-    domain/               # canonical feature vocabulary
+    application/          # InferenceService
+    domain/               # feature vocabulary, prediction and model types
+    infrastructure/       # artifact read/write + validation, IsolationForest wrapper
     core/                 # settings
+  ml/                     # synthetic data generator + training script
   tests/
 docs/
 ```

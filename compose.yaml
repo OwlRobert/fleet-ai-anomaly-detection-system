@@ -1,0 +1,83 @@
+# The whole system, locally, with one command:
+#
+#     docker compose up --build
+#
+# Containers reach each other by Compose service name on the default network:
+# the Telemetry Service talks to `mongodb:27017` and `inference-service:8001`,
+# never to localhost. Those addresses arrive as environment variables, so no
+# Docker-specific hostname is compiled into application code.
+#
+# Host ports default to 8000 / 8001 / 27017. They are overridable only so the
+# stack can still come up on a machine where one of those is already taken by
+# something else:
+#
+#     TELEMETRY_HOST_PORT=18000 docker compose up -d
+name: fleet-ai-anomaly-detection
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: fleet-mongodb
+    restart: unless-stopped
+    ports:
+      # Exposed so the stored documents can be inspected from the host.
+      - "${MONGODB_HOST_PORT:-27017}:27017"
+    volumes:
+      # Named volume: telemetry survives `docker compose down` and restarts.
+      # Only `docker compose down -v` removes it.
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  inference-service:
+    build:
+      context: ./inference-service
+    container_name: fleet-inference-service
+    restart: unless-stopped
+    ports:
+      - "${INFERENCE_HOST_PORT:-8001}:8001"
+    environment:
+      # The artifact trained into the image during the build, relative to WORKDIR.
+      MODEL_ARTIFACT_PATH: ml/artifacts/isolation_forest_v0_1_0.joblib
+      MODEL_NAME: isolation-forest-telemetry
+      MODEL_VERSION: "0.1.0"
+      INFERENCE_SERVICE_VERSION: "0.1.0"
+      LOG_LEVEL: INFO
+
+  telemetry-service:
+    build:
+      context: ./telemetry-service
+    container_name: fleet-telemetry-service
+    restart: unless-stopped
+    ports:
+      - "${TELEMETRY_HOST_PORT:-8000}:8000"
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DATABASE: fleet_telemetry
+      MONGODB_TELEMETRY_COLLECTION: telemetry_events
+      MONGODB_TIMEOUT_SECONDS: "5.0"
+      INFERENCE_SERVICE_URL: http://inference-service:8001
+      INFERENCE_TIMEOUT_SECONDS: "2.0"
+      MAX_CLOCK_SKEW_FUTURE_SECONDS: "300"
+      MAX_EVENT_AGE_DAYS: "30"
+      TELEMETRY_QUERY_DEFAULT_LIMIT: "100"
+      TELEMETRY_QUERY_MAX_LIMIT: "1000"
+      TELEMETRY_SERVICE_VERSION: "0.1.0"
+      LOG_LEVEL: INFO
+    depends_on:
+      mongodb:
+        # Persistence is mandatory: ingestion is fail-closed on it, so there is
+        # no point accepting traffic before the store answers.
+        condition: service_healthy
+      inference-service:
+        # Deliberately `service_started`, not `service_healthy`. Ingestion is
+        # fail-open on inference: an Inference Service that is slow or down must
+        # never hold up or degrade telemetry acceptance. This is ordering only.
+        condition: service_started
+
+volumes:
+  mongodb-data:

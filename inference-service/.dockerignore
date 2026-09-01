@@ -1,0 +1,32 @@
+# Everything the image does not need. Keeping the build context small keeps
+# builds fast and stops local state leaking into an image.
+#
+# Note what is NOT excluded: `ml/` is required, because the image trains the
+# model during the build. Only the *generated artifact* is excluded, so the
+# build always trains its own rather than copying whatever a developer happens
+# to have lying around.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+tests/
+pytest.ini
+
+ml/artifacts/
+*.joblib
+*.pkl
+
+.env
+.env.*
+*.log
+.DS_Store
+.vscode/
+.idea/
+Dockerfile
+.dockerignore

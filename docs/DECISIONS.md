@@ -17,6 +17,7 @@ record says so; the rest describe behavior later phases build.
 | [0007](#adr-0007-transport-independent-ingestion-use-case) | Transport-independent ingestion use case |
 | [0008](#adr-0008-deliberately-limited-ports) | Deliberately limited ports |
 | [0009](#adr-0009-pending-as-the-unscored-inference-state) | `PENDING` as the unscored inference state |
+| [0010](#adr-0010-train-the-model-during-the-image-build) | Train the model during the image build |
 
 ---
 
@@ -500,3 +501,65 @@ Add a third state, **`PENDING`**: the event is persisted and has not been scored
   never scored.
 * **Keep returning `501` until inference exists** — the event *was* stored, so the response would
   misreport what happened, and a client would retry indefinitely against a successful write.
+
+---
+
+## ADR-0010: Train the model during the image build
+
+**Status:** Accepted · 2026-09-01
+
+### Context
+
+The repository ignores `*.joblib`, so the ~20 MB model artifact is not committed. That is the right
+call for a generated binary, but it leaves a gap once the system is containerized: the Inference
+Service refuses to serve without an artifact, and a developer cloning the repository has none.
+
+Something has to produce it, and the options differ mainly in *where* they put that work: commit the
+binary, train when the container starts, train on the first request, or train while building the
+image.
+
+### Decision
+
+The Inference Service image runs `ml/train.py` as a build step. The artifact is baked into the
+image; the container loads it once at startup and never trains.
+
+```text
+source code → docker build → ml/train.py → model.joblib in the image
+            → container start → artifact loaded once → predictions served
+```
+
+This holds the line already drawn between training and serving
+([§11](ARCHITECTURE.md#11-model-and-inference-design)): the running service still never trains, not
+at startup and not in a request handler. Training simply moved from a developer's shell into the
+build.
+
+It works because training is deterministic — fixed seeds, explicit hyperparameters, no network and
+no external dataset — so the same source produces the same model, and an image is reproducible from
+the commit it was built from. Nothing about the model itself changes: same feature order,
+hyperparameters, score orientation, name, version and artifact schema.
+
+### Consequences
+
+* `docker compose up --build` works from a fresh clone with no manual preparation.
+* The image is self-contained: no artifact volume, no download at startup, no registry to reach.
+* Image builds are slower by the training time — under a second here — and the image carries the
+  artifact's size.
+* Retraining means rebuilding: `docker compose build --no-cache`. In a container deployment the
+  image tag becomes part of the model's identity, alongside `model_version`.
+* Running outside Docker still needs `python ml/train.py` once, exactly as before.
+
+### Alternatives considered
+
+* **Commit the artifact.** Puts a large regenerable binary into Git history, where it would drift
+  from the training code silently. It also contradicts the existing `.gitignore` policy.
+* **Train at container startup.** Erases the training/serving separation, makes startup slow and
+  variable, and retrains on every restart and every replica.
+* **Train on the first request.** Worse still: it puts training inside a request handler, which
+  [§11](ARCHITECTURE.md#11-model-and-inference-design) explicitly forbids.
+* **Mount an artifact from the host.** Reintroduces the manual step containerization exists to
+  remove, and makes the image depend on state outside it.
+
+### Revisit when
+
+A model registry exists, or models are trained on real data — at which point the artifact becomes an
+*input* to the build rather than a product of it, and this decision is replaced rather than amended.
