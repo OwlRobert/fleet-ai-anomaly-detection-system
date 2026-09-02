@@ -18,8 +18,13 @@ schema for records written before inference was integrated, and for the asynchro
 [ADR-0002](DECISIONS.md#adr-0002-synchronous-http-inference-for-the-mvp) describes; the synchronous
 path no longer produces it.
 
-Not implemented: the telemetry simulator, and everything listed under
-[§16](#16-out-of-scope).
+A host-side telemetry simulator drives a small fleet against the running stack. It is a client,
+not a component: standard library only, no retries or buffering of its own, and it talks solely to
+the Telemetry Service — routing telemetry to the model is that service's job, and the simulator has
+no knowledge that the model exists. It is deliberately not a Compose service, because it represents
+the edge, which is outside the system being deployed.
+
+Not implemented: everything listed under [§16](#16-out-of-scope).
 
 ## Contents
 
@@ -244,6 +249,7 @@ plus one Compose file that runs them together with MongoDB.
 
 ```text
 compose.yaml              # mongodb + inference-service + telemetry-service
+simulator/                # host-side demo client, standard library only
 telemetry-service/
   Dockerfile
   app/
@@ -269,10 +275,9 @@ docs/
 Dependency direction: `api → application → domain`, with `infrastructure` implementing
 `application` ports. `domain` imports nothing from the other layers.
 
-Directories that arrive with the code that fills them, rather than as empty packages:
-`inference-service/app/model` (artifact loading and metadata), and top-level `ml/` and
-`simulator/`. `InferencePort` and its adapter join `app/application` and `app/infrastructure` when
-inference is integrated — see [ADR-0008](DECISIONS.md#adr-0008-deliberately-limited-ports).
+`inference-service/app/model` — artifact loading and metadata — is the one directory from the
+original sketch that never appeared: the artifact format and the estimator wrapper live in
+`app/infrastructure` instead, next to the other adapters.
 
 ---
 

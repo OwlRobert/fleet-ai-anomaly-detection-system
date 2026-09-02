@@ -14,7 +14,6 @@ from app.core.config import Settings
 def test_the_documented_defaults_are_valid() -> None:
     settings = Settings()
 
-    assert settings.query_default_limit <= settings.query_max_limit
     assert settings.inference_timeout_seconds > 0
     assert settings.mongodb_timeout_seconds > 0
 
@@ -34,29 +33,18 @@ def test_a_non_positive_timeout_is_rejected(label: str, override: dict) -> None:
         Settings(**override)
 
 
-@pytest.mark.parametrize(
-    "override",
-    [
-        pytest.param({"TELEMETRY_QUERY_DEFAULT_LIMIT": "0"}, id="default-limit-zero"),
-        pytest.param({"TELEMETRY_QUERY_MAX_LIMIT": "0"}, id="max-limit-zero"),
-        pytest.param({"TELEMETRY_QUERY_DEFAULT_LIMIT": "-5"}, id="default-limit-negative"),
-    ],
-)
-def test_a_non_positive_query_limit_is_rejected(override: dict) -> None:
-    with pytest.raises(ValidationError):
-        Settings(**override)
+def test_page_size_bounds_live_in_the_api_contract_not_in_configuration() -> None:
+    """The `limit` bounds are enforced by the request schema, not by settings.
 
+    They were once declared as environment variables that nothing read — a knob
+    that silently did nothing. The schema is where they are actually enforced.
+    """
+    from app.api.schemas import TimeRangeQuery
 
-def test_a_default_page_larger_than_the_maximum_is_rejected() -> None:
-    """It could never be served, so it is a configuration error, not a runtime one."""
-    with pytest.raises(ValidationError, match="must not exceed"):
-        Settings(TELEMETRY_QUERY_DEFAULT_LIMIT="500", TELEMETRY_QUERY_MAX_LIMIT="100")
-
-
-def test_equal_limits_are_allowed() -> None:
-    settings = Settings(TELEMETRY_QUERY_DEFAULT_LIMIT="250", TELEMETRY_QUERY_MAX_LIMIT="250")
-
-    assert settings.query_default_limit == settings.query_max_limit == 250
+    limit = TimeRangeQuery.model_fields["limit"]
+    assert limit.default == 100
+    assert not hasattr(Settings(), "query_default_limit")
+    assert not hasattr(Settings(), "query_max_limit")
 
 
 @pytest.mark.parametrize(

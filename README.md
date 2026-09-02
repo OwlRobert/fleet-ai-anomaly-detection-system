@@ -15,9 +15,12 @@ by time range.
 >
 > The two failure policies are opposite by design: an inference outage still stores the telemetry
 > with `inference.status: "FAILED"` and no invented verdict (**fail-open**), while a persistence
-> outage returns `503` and acknowledges nothing (**fail-closed**). The simulator is not
-> implemented. Everything else below is either *specified for the MVP implementation* or marked as
-> a *future* concern.
+> outage returns `503` and acknowledges nothing (**fail-closed**). A host-side simulator drives a
+> small fleet against the running stack, so the whole thing is demonstrable in a few minutes.
+>
+> This is an **engineering demonstration**: the telemetry and the model's training data are
+> synthetic, and nothing here is a validated EV fault detector. See
+> [Known limitations](#14-known-limitations).
 
 ---
 
@@ -56,6 +59,16 @@ flowchart LR
     IS --> ML
     TS -->|"read / write"| DB
 ```
+
+| Component | Technology |
+| --- | --- |
+| Both services | Python 3.12, FastAPI, Pydantic v2, pydantic-settings, uvicorn |
+| Persistence | MongoDB 7, `pymongo` async API (`AsyncMongoClient`) |
+| Model | scikit-learn `IsolationForest`, serialized with joblib |
+| Service-to-service | HTTP via `httpx`, synchronous, bounded timeout |
+| Simulator | Python standard library only |
+| Runtime | Docker Compose |
+| Tests | pytest (+ anyio for async) |
 
 Inside the Telemetry Service:
 
@@ -120,7 +133,24 @@ curl -X POST localhost:8000/api/v1/telemetry -H 'Content-Type: application/json'
 ```
 
 It comes back `201` with `speed` in km/h, `battery_temperature` in degC, and the
-model's verdict. Then read it back:
+model's verdict.
+
+Or drive a whole fleet with the simulator — standard library only, no install:
+
+```bash
+python simulator/run.py                 # continuous, Ctrl+C to stop
+python simulator/run.py --count 12      # send 12 events and exit
+```
+
+```text
+EV-001 | normal   | 201 | COMPLETED | anomaly=false | score=-0.0436
+EV-002 | normal   | 201 | COMPLETED | anomaly=false | score=-0.0850
+EV-003 | injected | 201 | COMPLETED | anomaly=true  | score=+0.1106
+```
+
+`injected` marks an event the simulator *generated* as an anomaly candidate. It is never sent to
+the service and never compared against the answer — the verdict on the right is whatever the model
+actually returned. Then read the data back:
 
 ```bash
 curl "localhost:8000/api/v1/vehicles/veh-tw-0142/telemetry?start=2026-08-01T00:00:00Z&end=2026-12-01T00:00:00Z"
@@ -295,6 +325,7 @@ The two that most shape day-to-day behavior:
 
 ```text
 compose.yaml        # the whole stack: mongodb + inference-service + telemetry-service
+simulator/          # host-side demo client: generates fleet telemetry, stdlib only
 telemetry-service/
   Dockerfile
   app/
@@ -319,10 +350,8 @@ docs/
 
 Each service is independently runnable and has its own `requirements.txt`.
 
-Arriving with the phases that need them: `infrastructure/` and `application/ports` in the
-Telemetry Service (with the first repository and inference-client implementations), `model/` in
-the Inference Service, and top-level `ml/` and `simulator/`. Empty packages are not created ahead
-of the code that fills them.
+Each service is independently runnable and has its own `requirements.txt` and test suite. The
+simulator has neither: it is a client, not a component, and uses only the standard library.
 
 ---
 
@@ -336,8 +365,12 @@ of the code that fills them.
 | 3 | MongoDB persistence and idempotency — `TelemetryRepository`, unique `event_id`, duplicate/conflict handling, indexes, history and anomaly queries |
 | 4 | Anomaly model and Inference Service — synthetic training data, IsolationForest training, joblib artifact, load-time validation, real `/predict` and `/model/info` |
 | 5 | Telemetry ↔ inference integration — `InferencePort`, HTTP client, synchronous scoring, fail-open inference, `COMPLETED`/`FAILED` persistence |
-| 6 | **Containerization (current)** — Dockerfiles, Docker Compose, MongoDB volume, healthchecks, model trained at image build |
-| 7+ | Simulator, and the concerns listed as future below |
+| 6 | Containerization — Dockerfiles, Docker Compose, MongoDB volume, healthchecks, model trained at image build |
+| 7 | Reliability hardening — structured logging, `X-Request-ID`, configuration validation, failure-path tests |
+| 8 | **Telemetry simulator and documentation (current)** — host-side fleet simulator, demo walkthrough, final docs |
+
+Feature-complete for the MVP. Everything beyond this is in
+[Production evolution](#13-production-evolution).
 
 Sequencing beyond the current phase is decided per phase, not fixed here.
 
@@ -470,12 +503,145 @@ PYTHONPATH=. uvicorn app.main:app --port 8001
 
 ---
 
-## 11. Configuration
+## 11. Failure behavior
+
+Two downstream dependencies, deliberately opposite policies. This is the part of the design most
+worth understanding.
+
+| What fails | What the client gets | What is stored |
+| --- | --- | --- |
+| **Inference** — timeout, unreachable, upstream 5xx, unusable response | `201 Created`. The measurement is kept | `status: FAILED`, `error_code` set, and `is_anomaly`, `anomaly_score`, `model_name`, `model_version` **all null** |
+| **Persistence** — MongoDB unreachable or the write fails | `503 PERSISTENCE_UNAVAILABLE`, `retryable: true`. Nothing is acknowledged | nothing |
+| **Duplicate `event_id`** | `200 OK`, `duplicate: true` | unchanged — the original is returned and **inference is not re-run** |
+
+The asymmetry is the point: **fail-open applies only to the derived score, never to the
+measurement.** Telemetry is irreplaceable and a score can be recomputed later, so losing a reading
+because a model server was restarting is the worst available outcome. But acknowledging an event
+that was never stored is equally unacceptable — the client would stop retrying and the reading
+would be gone with no record it ever existed.
+
+An unscored event is **not** a non-anomalous event. `FAILED` and `PENDING` records are excluded
+from the anomalies endpoint and from its partial index, because the absence of a verdict is not a
+negative verdict.
+
+An inference outage never makes the Telemetry Service unready: `/health/ready` checks only the
+telemetry store.
+
+---
+
+## 12. Interview demo
+
+A three-to-five minute walkthrough.
+
+**1 — Architecture** (30 s). The diagram in [§2](#2-mvp-architecture-at-a-glance): a simulated edge
+sending telemetry over REST; a Telemetry Service that normalizes, scores and stores; a separate
+Inference Service holding the model. The split is deliberate — it forces a real inference boundary
+with its own contract, versioning surface and failure mode.
+
+**2 — Start it** (30 s).
+
+```bash
+docker compose up --build -d && docker compose ps
+```
+
+Three containers, all healthy. The model is trained during the image build, so this works from a
+fresh clone with no manual step.
+
+**3 — Swagger** (30 s). <http://localhost:8000/docs> and <http://localhost:8001/docs>. Point at the
+telemetry request schema: every metric carries its **own** unit, because real firmware mixes
+conventions — mph for speed alongside degC for temperature.
+
+**4 — Send telemetry** (60 s).
+
+```bash
+python simulator/run.py --count 12 --anomaly-rate 0.3
+```
+
+Three vehicles, mostly ordinary readings, some deliberately extreme. `injected` is the simulator's
+intent; the verdict is the model's answer.
+
+**5 — Read it back** (30 s). History returns canonical units and UTC — the mph and degF that went
+in come back as km/h and degC. The anomalies endpoint returns only what a *completed* run scored as
+anomalous.
+
+**6 — Break inference** (60 s). This is the interesting one.
+
+```bash
+docker compose stop inference-service
+python simulator/run.py --count 3
+```
+
+Still `201`. The telemetry is stored with `FAILED` and a null verdict — no invented `is_anomaly:
+false`. Readiness stays `ready`, because ingestion is fail-open on inference.
+
+```bash
+docker compose start inference-service
+```
+
+**7 — Break persistence** (30 s). `docker compose stop mongodb`, send again: `503
+PERSISTENCE_UNAVAILABLE`, `retryable: true`, readiness `not_ready`. Nothing is acknowledged that
+was not stored.
+
+**8 — Trade-offs** (30 s). Synchronous HTTP inference (simple, predictable, one network hop in the
+write path); `event_id` idempotency enforced by a unique index rather than a read-then-write check;
+one canonical unit system so the model never sees a client's display preference; the model loaded
+once at startup and never in a request handler.
+
+---
+
+## 13. Production evolution
+
+None of this is implemented. It is where the design would go next, and the extension points already
+exist for most of it.
+
+- **MQTT ingestion gateway** — a second transport calling the same `IngestTelemetry` use case, which
+  is exactly why that boundary exists.
+- **Kafka or similar** for high-throughput buffering ahead of ingestion.
+- **Asynchronous inference** — persist first with `PENDING`, score from a worker. The status
+  vocabulary already accommodates it.
+- **Retry, dead-letter and circuit breaking** around the inference call, plus a backfill job to
+  re-score `FAILED` events — all enabled by `inference.status` being recorded rather than inferred.
+- **Model registry and retraining** on real, labelled data, with proper evaluation.
+- **Production observability** — metrics, dashboards and distributed tracing rather than logs alone.
+- **Authentication and authorization** on both services.
+- **Kubernetes or a managed cloud runtime**, horizontal scaling, and a replicated MongoDB.
+- **CI/CD** running these suites on every change.
+
+---
+
+## 14. Known limitations
+
+Stated plainly, because they matter more than the feature list.
+
+- **The telemetry is synthetic.** So is the model's training data. Both are generated by scripts in
+  this repository.
+- **This is not a validated EV fault detector.** The anomaly examples are demonstrations, not real
+  failure signatures, and the model has never been evaluated against labelled faults.
+- **IsolationForest cannot extrapolate.** A single feature far outside the training range lands in
+  the same leaf as boundary samples, so it is not guaranteed to be flagged.
+- **`anomaly_score` is a ranking score, not a probability.** It is unbounded and deliberately not
+  squashed into `[0, 1]`.
+- **One local MongoDB**, no replica set, no HA, no backups.
+- **No authentication or authorization** on either service.
+- **Synchronous inference** in the write path: ingest latency includes inference latency, bounded by
+  a 2 s timeout, with no retries.
+- **No queue, no workers, no automatic retraining.**
+- **Logs only** — no metrics endpoint, no tracing, no per-request latency measurement.
+- **Local Docker Compose focus.** Nothing here is tuned or hardened for a real deployment.
+
+---
+
+## 15. Configuration
 
 `.env.example` documents the full configuration surface of both services. It contains no secrets
 and is the only environment file committed to the repository.
 
-## 12. Documentation
+Page size for the history endpoints is **not** configurable: `limit` defaults to 100 and is capped
+at 1000 by the request schema, where it is validated. It was briefly declared as two environment
+variables that nothing read — a knob that silently did nothing — and those were removed rather than
+left as a trap.
+
+## 16. Documentation
 
 * [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — components, contracts, data model, failure
   policy, multinational concerns, extension points.

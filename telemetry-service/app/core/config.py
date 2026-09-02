@@ -8,9 +8,9 @@ documents, which carry no service prefix; `validation_alias` bypasses
 """
 
 from functools import lru_cache
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVICE_NAME = "telemetry-service"
@@ -79,19 +79,6 @@ class Settings(BaseSettings):
         description="Bounded timeout for one inference attempt. No retries.",
     )
 
-    query_default_limit: int = Field(
-        default=100,
-        ge=1,
-        validation_alias="TELEMETRY_QUERY_DEFAULT_LIMIT",
-        description="Default page size for the vehicle history endpoints.",
-    )
-    query_max_limit: int = Field(
-        default=1000,
-        ge=1,
-        validation_alias="TELEMETRY_QUERY_MAX_LIMIT",
-        description="Maximum page size for the vehicle history endpoints.",
-    )
-
     log_level: str = Field(
         default="INFO",
         validation_alias="LOG_LEVEL",
@@ -103,15 +90,6 @@ class Settings(BaseSettings):
         validation_alias="LOG_FORMAT",
         description="`json` for collectors, `text` for reading locally.",
     )
-
-    @model_validator(mode="after")
-    def _check_query_limits(self) -> Self:
-        """A default page larger than the maximum can never be served."""
-        if self.query_default_limit > self.query_max_limit:
-            raise ValueError(
-                "TELEMETRY_QUERY_DEFAULT_LIMIT must not exceed TELEMETRY_QUERY_MAX_LIMIT"
-            )
-        return self
 
     @property
     def mongodb_timeout_ms(self) -> int:
